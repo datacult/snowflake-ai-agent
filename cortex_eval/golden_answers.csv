@@ -1,0 +1,461 @@
+﻿id,question,expected_sql,Category,Difficulty
+1,What was the total gross revenue last week by channel type?,"WITH weekly_performance AS (
+    SELECT
+        ch.channel_type,
+        SUM(ma.gross_revenue_no_vat_normalized)     AS gross_revenue
+    FROM ANALYTICS.REPORTING.FCT_MARKETING_ACTIVITY ma
+    LEFT JOIN ANALYTICS.REPORTING.DIM_CHANNEL ch
+        ON ma.channel_id = ch.channel_id
+    WHERE CONVERT_TIMEZONE('UTC', 'America/New_York',
+          ma.conversion_date::TIMESTAMP_NTZ)
+          BETWEEN '2026-02-16' AND '2026-02-22'
+    GROUP BY ch.channel_type
+)
+SELECT
+    channel_type,
+    gross_revenue
+FROM weekly_performance
+WHERE channel_type IS NOT NULL
+ORDER BY gross_revenue DESC",Aggregation,Easy
+2,What was last week's ROAS by channel subtype?,"SELECT
+    ch.channel_subtype,
+    ROUND(SUM(ma.gross_less_discount_no_vat_normalized) /
+          NULLIF(SUM(ma.weighted_spend), 0), 2)     AS roas
+FROM ANALYTICS.REPORTING.FCT_MARKETING_ACTIVITY ma
+LEFT JOIN ANALYTICS.REPORTING.DIM_CHANNEL ch
+    ON ma.channel_id = ch.channel_id
+WHERE CONVERT_TIMEZONE('UTC', 'America/New_York',
+      ma.conversion_date::TIMESTAMP_NTZ)
+      BETWEEN '2026-02-16' AND '2026-02-22'
+  AND ch.channel_type = 'Paid'
+GROUP BY ch.channel_subtype
+ORDER BY roas DESC",Ratio Metric,Easy
+3,What is the CAC by paid channel subtype last complete month?,"SELECT
+    ch.channel_subtype,
+    ROUND(SUM(ma.weighted_spend) /
+          NULLIF(COUNT(CASE WHEN ma.customer_type = 'new'
+          THEN ma.normalized_weight END), 0), 2)  as cac
+    
+FROM ANALYTICS.REPORTING.FCT_MARKETING_ACTIVITY ma
+LEFT JOIN ANALYTICS.REPORTING.DIM_CHANNEL ch
+    ON ma.channel_id = ch.channel_id
+WHERE
+    DATE(CONVERT_TIMEZONE('UTC', 'America/New_York',
+         ma.conversion_date::TIMESTAMP_NTZ))
+    >= DATE_TRUNC('MONTH', DATEADD(MONTH, -1, CURRENT_DATE))
+AND
+    DATE(CONVERT_TIMEZONE('UTC', 'America/New_York',
+         ma.conversion_date::TIMESTAMP_NTZ))
+    < DATE_TRUNC('MONTH', CURRENT_DATE)
+  AND LOWER(ch.channel_type) = 'paid'
+GROUP BY ch.channel_subtype
+ORDER BY cac ASC",Ratio Metric,Medium
+4,What is the split of new vs repeat customers by channel last week?,"SELECT
+    ch.channel,
+    SUM(CASE WHEN ma.customer_type = 'new'
+          THEN ma.normalized_weight END)                      AS new_customers,
+    SUM(CASE WHEN ma.customer_type = 'repeat'
+          THEN ma.NORMALIZED_WEIGHT END)                      AS repeat_customers,
+    COUNT(DISTINCT ma.customer_id)                      AS total_customers,
+    ROUND(COUNT(DISTINCT CASE WHEN ma.customer_type = 'new'
+          THEN ma.customer_id END) * 100.0 /
+          NULLIF(COUNT(DISTINCT ma.customer_id), 0), 1) AS new_pct,
+    ROUND(COUNT(DISTINCT CASE WHEN ma.customer_type = 'repeat'
+          THEN ma.customer_id END) * 100.0 /
+          NULLIF(COUNT(DISTINCT ma.customer_id), 0), 1) AS repeat_pct
+FROM ANALYTICS.REPORTING.FCT_MARKETING_ACTIVITY ma
+LEFT JOIN ANALYTICS.REPORTING.DIM_CHANNEL ch
+    ON ma.channel_id = ch.channel_id
+WHERE CONVERT_TIMEZONE('UTC', 'America/New_York',
+      ma.conversion_date::TIMESTAMP_NTZ)
+      BETWEEN '2026-02-16' AND '2026-02-22'
+GROUP BY ch.channel
+ORDER BY total_customers DESC",Segmentation,Easy
+5,What is the new vs repeat order volume split by paid platform last week?,"SELECT
+    ch.platform,
+    SUM(CASE WHEN ma.customer_type = 'new'
+          THEN ma.NORMALIZED_WEIGHT END)                         AS new_orders,
+    SUM(CASE WHEN ma.customer_type = 'repeat'
+          THEN ma.NORMALIZED_WEIGHT END)                         AS repeat_orders,
+    SUM(ma.NORMALIZED_WEIGHT)                         AS total_orders,
+    ROUND(SUM(CASE WHEN ma.customer_type = 'new'
+          THEN ma.NORMALIZED_WEIGHT END) * 100.0 /
+          NULLIF(SUM(ma.NORMALIZED_WEIGHT), 0), 1)    AS new_pct,
+    ROUND(SUM(CASE WHEN ma.customer_type = 'repeat'
+          THEN ma.NORMALIZED_WEIGHT END) * 100.0 /
+          NULLIF(SUM(ma.NORMALIZED_WEIGHT), 0), 1)    AS repeat_pct
+FROM ANALYTICS.REPORTING.FCT_MARKETING_ACTIVITY ma
+LEFT JOIN ANALYTICS.REPORTING.DIM_CHANNEL ch
+    ON ma.channel_id = ch.channel_id
+WHERE CONVERT_TIMEZONE('UTC', 'America/New_York',
+      ma.conversion_date::TIMESTAMP_NTZ)
+      BETWEEN '2026-02-16' AND '2026-02-22'
+  AND LOWER(ch.channel_type) = 'paid'
+  AND ch.platform IN ('facebook', 'google', 'tiktok', 'reddit')
+GROUP BY ch.platform
+ORDER BY total_orders DESC",Segmentation,Medium
+6,What is the total marketing spend and nROAS by paid platform last week?,"WITH base AS (
+    SELECT
+        ch.platform,
+        ch.channel_type,
+        ma.weighted_spend,
+        ma.new_gross_less_discount_revenue_no_vat_normalized,
+        CONVERT_TIMEZONE(
+            'UTC',
+            'America/New_York',
+            ma.conversion_date::TIMESTAMP_NTZ
+        ) AS conversion_date_est
+    FROM ANALYTICS.REPORTING.FCT_MARKETING_ACTIVITY ma
+    LEFT JOIN ANALYTICS.REPORTING.DIM_CHANNEL ch
+        ON ma.channel_id = ch.channel_id
+)
+
+SELECT
+    platform,
+    SUM(weighted_spend) AS total_spend,
+    SUM(new_gross_less_discount_revenue_no_vat_normalized) AS new_customer_revenue,
+    ROUND(
+        SUM(new_gross_less_discount_revenue_no_vat_normalized) /
+        NULLIF(SUM(weighted_spend), 0),
+        2
+    ) AS nroas
+FROM base
+WHERE conversion_date_est >= DATEADD(
+            WEEK, -1,
+            DATE_TRUNC(
+                WEEK,
+                CONVERT_TIMEZONE('UTC','America/New_York', CURRENT_TIMESTAMP())
+            )
+      )
+  AND conversion_date_est < DATE_TRUNC(
+            WEEK,
+            CONVERT_TIMEZONE('UTC','America/New_York', CURRENT_TIMESTAMP())
+      )
+  AND LOWER(channel_type) = 'paid'
+GROUP BY platform
+ORDER BY total_spend DESC;",Share / Mix Analysis,Medium
+7,What is the revenue and spend mix by paid platform last week?,"WITH base AS (
+    SELECT
+        ch.platform,
+        ch.channel_type,
+        ma.weighted_spend,
+        ma.gross_revenue_no_vat_normalized,
+        CONVERT_TIMEZONE(
+            'UTC',
+            'America/New_York',
+            ma.conversion_date::TIMESTAMP_NTZ
+        ) AS conversion_date_est
+    FROM ANALYTICS.REPORTING.FCT_MARKETING_ACTIVITY ma
+    LEFT JOIN ANALYTICS.REPORTING.DIM_CHANNEL ch
+        ON ma.channel_id = ch.channel_id
+)
+
+SELECT
+    platform,
+    SUM(weighted_spend)                  AS platform_spend,
+    SUM(gross_revenue_no_vat_normalized) AS platform_revenue
+FROM base
+WHERE conversion_date_est >= DATEADD(
+            WEEK, -1,
+            DATE_TRUNC(
+                WEEK,
+                CONVERT_TIMEZONE('UTC','America/New_York', CURRENT_TIMESTAMP())
+            )
+      )
+  AND conversion_date_est < DATE_TRUNC(
+            WEEK,
+            CONVERT_TIMEZONE('UTC','America/New_York', CURRENT_TIMESTAMP())
+      )
+  AND LOWER(channel_type) = 'paid'
+GROUP BY platform
+ORDER BY platform_spend DESC;",Share / Mix Analysis,Hard
+8,What are the top 10 campaigns by gross revenue last complete month?,"SELECT
+    dc.campaign_name,
+    round(coalesce(SUM(ma.gross_revenue_no_vat_normalized),0),2)             AS gross_revenue,
+  
+FROM ANALYTICS.REPORTING.FCT_MARKETING_ACTIVITY ma
+LEFT JOIN ANALYTICS.REPORTING.DIM_CAMPAIGN dc
+    ON ma.campaign_id = dc.campaign_id
+WHERE
+    DATE(CONVERT_TIMEZONE('UTC', 'America/New_York',
+         ma.conversion_date::TIMESTAMP_NTZ))
+    >= DATE_TRUNC('MONTH', DATEADD(MONTH, -1, CURRENT_DATE))
+AND
+    DATE(CONVERT_TIMEZONE('UTC', 'America/New_York',
+         ma.conversion_date::TIMESTAMP_NTZ))
+    < DATE_TRUNC('MONTH', CURRENT_DATE)
+      and campaign_name is not null
+GROUP BY dc.campaign_name
+ORDER BY gross_revenue DESC
+LIMIT 10",Multi-Metric Ranking,Medium
+9,What is the weekly trend of total spend and CAC over the last 13 weeks?,"SELECT
+    DATE_TRUNC('WEEK', CONVERT_TIMEZONE('UTC', 'America/New_York',
+        ma.conversion_date::TIMESTAMP_NTZ))             AS week_start,
+    ROUND(SUM(ma.weighted_spend),0)                             AS total_spend,
+    ROUND(SUM(ma.weighted_spend) /
+          NULLIF(SUM(CASE WHEN ma.customer_type = 'new'
+          THEN ma.normalized_weight END), 0), 2)              AS cac
+FROM ANALYTICS.REPORTING.FCT_MARKETING_ACTIVITY ma
+LEFT JOIN ANALYTICS.REPORTING.DIM_CHANNEL ch
+    ON ma.channel_id = ch.channel_id
+WHERE CONVERT_TIMEZONE('UTC', 'America/New_York',
+      ma.conversion_date::TIMESTAMP_NTZ) >= DATEADD('WEEK', -13, CURRENT_DATE)
+GROUP BY week_start
+ORDER BY week_start ASC",Multi-Metric Ranking,Hard
+10,What is the product category revenue breakdown by channel type last week?,"WITH base AS (
+    SELECT
+        ch.channel_type,
+        p.category AS product_category,
+        ma.net_revenue_no_vat_normalized,
+        CONVERT_TIMEZONE(
+            'UTC',
+            'America/New_York',
+            ma.conversion_date::TIMESTAMP_NTZ
+        ) AS conversion_date_est
+    FROM ANALYTICS.REPORTING.FCT_MARKETING_ACTIVITY ma
+    LEFT JOIN ANALYTICS.REPORTING.DIM_CHANNEL ch
+        ON ma.channel_id = ch.channel_id
+    LEFT JOIN ANALYTICS.REPORTING.DIM_PRODUCT p
+        ON ma.sku = p.child_sku
+)
+
+SELECT
+    channel_type,
+    product_category,
+    SUM(net_revenue_no_vat_normalized) AS net_revenue,
+    ROUND(
+        SUM(net_revenue_no_vat_normalized) * 100.0 /
+        NULLIF(
+            SUM(SUM(net_revenue_no_vat_normalized))
+            OVER (PARTITION BY channel_type),
+            0
+        ),
+        1
+    ) AS pct_of_channel_revenue
+FROM base
+WHERE conversion_date_est >= DATEADD(
+            WEEK, -1,
+            DATE_TRUNC(
+                WEEK,
+                CONVERT_TIMEZONE('UTC','America/New_York', CURRENT_TIMESTAMP())
+            )
+      )
+  AND conversion_date_est < DATE_TRUNC(
+            WEEK,
+            CONVERT_TIMEZONE('UTC','America/New_York', CURRENT_TIMESTAMP())
+      )
+GROUP BY channel_type, product_category
+ORDER BY channel_type, net_revenue DESC;",Time Series,Medium
+11,What are the top 5 products by revenue for each paid platform last week?,"WITH base AS (
+    SELECT
+        ch.platform,
+        ch.channel_type,
+        p.parent_product,
+        ma.net_revenue_no_vat_normalized,
+        CONVERT_TIMEZONE(
+            'UTC',
+            'America/New_York',
+            ma.conversion_date::TIMESTAMP_NTZ
+        ) AS conversion_date_est
+    FROM ANALYTICS.REPORTING.FCT_MARKETING_ACTIVITY ma
+    LEFT JOIN ANALYTICS.REPORTING.DIM_CHANNEL ch
+        ON ma.channel_id = ch.channel_id
+    LEFT JOIN ANALYTICS.REPORTING.DIM_PRODUCT p
+        ON ma.sku = p.child_sku
+),
+
+platform_product AS (
+    SELECT
+        platform,
+        parent_product,
+        SUM(net_revenue_no_vat_normalized) AS gross_revenue,
+        ROW_NUMBER() OVER (
+            PARTITION BY platform
+            ORDER BY SUM(net_revenue_no_vat_normalized) DESC
+        ) AS rank
+    FROM base
+    WHERE conversion_date_est >= DATEADD(
+                WEEK, -1,
+                DATE_TRUNC(
+                    WEEK,
+                    CONVERT_TIMEZONE('UTC','America/New_York', CURRENT_TIMESTAMP())
+                )
+          )
+      AND conversion_date_est < DATE_TRUNC(
+                WEEK,
+                CONVERT_TIMEZONE('UTC','America/New_York', CURRENT_TIMESTAMP())
+          )
+      AND LOWER(channel_type) = 'paid'
+      AND parent_product IS NOT NULL
+    GROUP BY platform, parent_product
+)
+
+SELECT
+    platform,
+    parent_product,
+    gross_revenue,
+    rank
+FROM platform_product
+WHERE rank <= 5
+ORDER BY platform, rank;",Time Series,Hard
+12,What is the CTR and total impressions by week over the last 13 weeks for paid social and paid search?,"WITH base AS (
+    SELECT
+        DATE_TRUNC(
+            'WEEK',
+            CONVERT_TIMEZONE(
+                'UTC',
+                'America/New_York',
+                ma.conversion_date::TIMESTAMP_NTZ
+            )
+        ) AS week_start,
+        ch.channel_subtype,
+        ma.weighted_impressions,
+        ma.weighted_clicks,
+        CONVERT_TIMEZONE(
+            'UTC',
+            'America/New_York',
+            ma.conversion_date::TIMESTAMP_NTZ
+        ) AS conversion_date_est
+    FROM ANALYTICS.REPORTING.FCT_MARKETING_ACTIVITY ma
+    LEFT JOIN ANALYTICS.REPORTING.DIM_CHANNEL ch
+        ON ma.channel_id = ch.channel_id
+)
+
+SELECT
+    week_start,
+    channel_subtype,
+    SUM(weighted_impressions) AS total_impressions,
+    ROUND(
+        SUM(weighted_clicks) /
+        NULLIF(SUM(weighted_impressions), 0) * 100,
+        2
+    ) AS ctr
+FROM base
+WHERE conversion_date_est >= DATEADD(
+            WEEK, -13,
+            DATE_TRUNC(
+                WEEK,
+                CONVERT_TIMEZONE('UTC','America/New_York', CURRENT_TIMESTAMP())
+            )
+      )
+  AND conversion_date_est < DATE_TRUNC(
+            WEEK,
+            CONVERT_TIMEZONE('UTC','America/New_York', CURRENT_TIMESTAMP())
+      )
+  AND LOWER(channel_subtype) IN ('paid social', 'paid search')
+GROUP BY week_start, channel_subtype
+ORDER BY week_start ASC, channel_subtype;",Cross-Dimension Aggregation,Medium
+13,What is the revenue contribution of top-of-funnel vs bottom-of-funnel channels last week?,"WITH base AS (
+    SELECT
+        CASE WHEN ma.is_top_of_funnel = TRUE
+             THEN 'Top of Funnel'
+             ELSE 'Bottom of Funnel'
+        END AS funnel_stage,
+        ch.channel_type,
+        ma.net_revenue_no_vat_normalized,
+        CONVERT_TIMEZONE(
+            'UTC',
+            'America/New_York',
+            ma.conversion_date::TIMESTAMP_NTZ
+        ) AS conversion_date_est
+    FROM ANALYTICS.REPORTING.FCT_MARKETING_ACTIVITY ma
+    LEFT JOIN ANALYTICS.REPORTING.DIM_CHANNEL ch
+        ON ma.channel_id = ch.channel_id
+)
+
+SELECT
+    funnel_stage,
+    channel_type,
+    SUM(net_revenue_no_vat_normalized) AS gross_revenue
+FROM base
+WHERE conversion_date_est >= DATEADD(
+            WEEK, -1,
+            DATE_TRUNC(
+                WEEK,
+                CONVERT_TIMEZONE('UTC','America/New_York', CURRENT_TIMESTAMP())
+            )
+      )
+  AND conversion_date_est < DATE_TRUNC(
+            WEEK,
+            CONVERT_TIMEZONE('UTC','America/New_York', CURRENT_TIMESTAMP())
+      )
+GROUP BY funnel_stage, channel_type
+ORDER BY funnel_stage, gross_revenue DESC;",Ranked Window Function,Medium
+14,What is the CPC and conversion rate by paid channel subtype last week?,"WITH base AS (
+    SELECT
+        ch.channel_subtype,
+        ch.channel_type,
+        ma.weighted_clicks,
+        ma.weighted_spend,
+        ma.conversion_hash_id,
+        CONVERT_TIMEZONE(
+            'UTC',
+            'America/New_York',
+            ma.conversion_date::TIMESTAMP_NTZ
+        ) AS conversion_date_est
+    FROM ANALYTICS.REPORTING.FCT_MARKETING_ACTIVITY ma
+    LEFT JOIN ANALYTICS.REPORTING.DIM_CHANNEL ch
+        ON ma.channel_id = ch.channel_id
+)
+
+SELECT
+    channel_subtype,
+    SUM(weighted_clicks)                              AS total_clicks,
+    SUM(weighted_spend)                               AS total_spend,
+    ROUND(SUM(weighted_spend) /
+          NULLIF(SUM(weighted_clicks), 0), 2)         AS cpc,
+    ROUND(COUNT(DISTINCT conversion_hash_id) /
+          NULLIF(SUM(weighted_clicks), 0) * 100, 2)   AS conversion_rate_pct
+FROM base
+WHERE conversion_date_est >= DATEADD(
+            WEEK, -1,
+            DATE_TRUNC(
+                WEEK,
+                CONVERT_TIMEZONE('UTC','America/New_York', CURRENT_TIMESTAMP())
+            )
+      )
+  AND conversion_date_est < DATE_TRUNC(
+            WEEK,
+            CONVERT_TIMEZONE('UTC','America/New_York', CURRENT_TIMESTAMP())
+      )
+  AND LOWER(channel_type) = 'paid'
+GROUP BY channel_subtype
+ORDER BY total_spend DESC;",Conditional Aggregation,Hard
+15,What is the revenue and new customer share by channel type as a percentage of total last week?,"WITH channel_totals AS (
+    SELECT
+        ch.channel_type,
+        SUM(ma.net_revenue_no_vat_normalized)   AS channel_revenue,
+        SUM(CASE WHEN ma.customer_type = 'new'
+              THEN ma.normalized_weight END)    AS new_customers
+    FROM ANALYTICS.REPORTING.FCT_MARKETING_ACTIVITY ma
+    LEFT JOIN ANALYTICS.REPORTING.DIM_CHANNEL ch
+        ON ma.channel_id = ch.channel_id
+    WHERE CONVERT_TIMEZONE('UTC', 'America/New_York',
+          ma.conversion_date::TIMESTAMP_NTZ)
+          >= DATEADD(
+                WEEK, -1,
+                DATE_TRUNC(
+                    WEEK,
+                    CONVERT_TIMEZONE('UTC','America/New_York', CURRENT_TIMESTAMP())
+                )
+             )
+      AND CONVERT_TIMEZONE('UTC', 'America/New_York',
+          ma.conversion_date::TIMESTAMP_NTZ)
+          < DATE_TRUNC(
+                WEEK,
+                CONVERT_TIMEZONE('UTC','America/New_York', CURRENT_TIMESTAMP())
+            )
+    GROUP BY ch.channel_type
+)
+
+SELECT
+    channel_type,
+    channel_revenue,
+    new_customers,
+    ROUND(channel_revenue * 100.0 /
+          NULLIF(SUM(channel_revenue) OVER (), 0), 1)   AS pct_revenue,
+    ROUND(new_customers * 100.0 /
+          NULLIF(SUM(new_customers) OVER (), 0), 1)     AS pct_new_customers
+FROM channel_totals
+ORDER BY channel_revenue DESC;",Conditional Aggregation,Hard
+16,What is the product category mix by paid platform last week?,,Aggregation,Hard
