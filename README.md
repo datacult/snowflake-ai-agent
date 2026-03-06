@@ -107,6 +107,20 @@ python app.py
 
 ---
 
+## Resources
+
+| Topic | Link |
+|-------|------|
+| Cortex Agents | [Snowflake Cortex Agents](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-agents) |
+| Cortex Analyst | [Snowflake Cortex Analyst](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-analyst) |
+| Cortex Search | [Snowflake Cortex Search Overview](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-search/cortex-search-overview) |
+| Semantic Views | [Semantic Views Overview](https://docs.snowflake.com/en/user-guide/views-semantic/overview) |
+| Cross-Region Inference | [Cross-Region Inference Parameter](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cross-region-inference#how-to-use-the-cross-region-inference-parameter) |
+| Slack Integration | [Integrate Cortex Agents with Slack](https://www.snowflake.com/en/developers/guides/integrate-snowflake-cortex-agents-with-slack/) |
+| Agent Evaluation | [Getting Started with Cortex Agent Evaluations](https://www.snowflake.com/en/developers/guides/getting-started-with-cortex-agent-evaluations/) |
+
+---
+
 ## Full Workflow
 
 ```
