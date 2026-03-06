@@ -35,8 +35,8 @@ GRANT SELECT ON VIEW ANALYTICS.REPORTING.<Agent-Created> TO ROLE cortex_agent_us
 
 2. Go to the AI & ML section on the Snowflake UI and click on Agents, then click on Create Agents to create a new Agent.
 
-![alt text](image.png)
-![alt text](image-1.png)
+![alt text](images/image.png)
+![alt text](images/image-1.png)
 
 3. Select Database and Schema where the Agent will run, give the agent a name and create the agent.
 
@@ -48,7 +48,7 @@ GRANT SELECT ON VIEW ANALYTICS.REPORTING.<Agent-Created> TO ROLE cortex_agent_us
 - **Description:** Agent Description
 - **Example questions:** Example questions that users will see on Snowflake Intelligence
 
-![alt text](image-2.png)
+![alt text](images/image-2.png)
 
 ### The Tools Tab
 
@@ -57,7 +57,7 @@ GRANT SELECT ON VIEW ANALYTICS.REPORTING.<Agent-Created> TO ROLE cortex_agent_us
 - **Cortex Search:** This allows you to select a search service for unstructured data.
 - **Custom Tools:** This allows you to create custom tools using UDFs that the agent can call.
 
-![alt text](image-3.png)
+![alt text](images/image-3.png)
 
 ### The Orchestration Tab
 
@@ -66,13 +66,13 @@ GRANT SELECT ON VIEW ANALYTICS.REPORTING.<Agent-Created> TO ROLE cortex_agent_us
 - **Response Instruction:** Set rules for how the agent should sound and respond to users. This is helpful to guide the agent on how it should sound.
 - **Budget Configuration:** Allows you to set limits for time run and token usage.
 
-![alt text](image-4.png)
+![alt text](images/image-4.png)
 
 ### The Access Tab
 
 This allows you to grant access to any roles that should use the Agent. For example, if I wanted a Snowflake user to access the agent in Snowflake Intelligence, that user's role should be granted access.
 
-![alt text](image-5.png)
+![alt text](images/image-5.png)
 
 ## How to Create Cortex Analyst
 
@@ -82,23 +82,23 @@ There are two ways to create this: either from the Snowflake UI or by calling a 
 
 Below is a step-by-step pictorial guide using the Snowflake UI.
 
-1. ![alt text](image-6.png)
+1. ![alt text](images/image-6.png)
 
    Use Semantic View instead of model.
 
-   ![alt text](image-7.png)
+   ![alt text](images/image-7.png)
 
    Select location to store view, and input the name and description of the Agent.
 
-   ![alt text](image-8.png)
+   ![alt text](images/image-8.png)
 
    Select tables to be used for the semantic view.
 
-   ![alt text](image-9.png)
+   ![alt text](images/image-9.png)
 
    Select columns to be included in the semantic view and create the Semantic view for the agent.
 
-   ![alt text](image-10.png)
+   ![alt text](images/image-10.png)
 
 ### Using Stored Procedure
 
@@ -109,7 +109,7 @@ Below is how to create a Semantic View for Cortex Analyst using a Stored Procedu
 This SP allows 1 or 2 inputs where the compulsory input is the Semantic view instructions that shows the tables, columns, metrics, dimensions and relationships between the tables.
 The second optional arg is TRUE, when TRUE is added, this will check if your YAML file is valid for creating a semantic view but no object will be created. But without the TRUE arg the semantic view object will be created and can be seen in the database explorer.
 
-![alt text](image-11.png)
+![alt text](images/image-11.png)
 
 Below is an example query calling the stored procedure.
 
@@ -468,7 +468,7 @@ These are the following ways you can improve Agent Context:
 
 1. **The Semantic View:** This is the core context layer where you define tables, columns, facts, dimensions, metrics and also relationships between the tables. You can define these from the Semantic view query or in the UI.
 
-   ![alt text](image-12.png)
+   ![alt text](images/image-12.png)
 
 2. **Custom instructions:** Another area for context building is the custom instructions layer. Here you can include instructions for SQL generation with the example below.
 
