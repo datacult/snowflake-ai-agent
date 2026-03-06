@@ -1,12 +1,33 @@
 # Snowflake AI Agent Implementation
 
-This repository contains two projects for building and evaluating AI-powered analytics on top of Snowflake Cortex.
+This repository contains three projects for setting up, building, and evaluating AI-powered analytics on top of Snowflake Cortex.
 
 ---
 
 ## Projects
 
-### 1. `cortex_eval/` — Cortex Analyst Evaluation Pipeline
+### 1. `setup-snowflake-agent/` — Snowflake Cortex Agent Setup Guide
+
+A step-by-step guide for setting up Snowflake Cortex Agent from scratch, including roles, semantic views, and agent configuration.
+
+**What it covers:**
+- Creating the required Snowflake role and granting necessary permissions
+- Creating and configuring a Cortex Agent in the Snowflake UI (About, Tools, Orchestration, Access tabs)
+- Building a Cortex Analyst semantic view — either through the UI or via the `SYSTEM$CREATE_SEMANTIC_VIEW_FROM_YAML` stored procedure — with full YAML schema examples covering dimensions, facts, metrics, and table relationships
+- Adding context to the agent via semantic view definitions and custom SQL generation instructions
+- Writing agent orchestration and response instructions to control routing logic, tone, and output format
+- Enabling cross-region inference to access models outside your Snowflake region
+- Setting up Cortex Search for unstructured data (in progress)
+
+**Key files:**
+| File | Description |
+|------|-------------|
+| `setup.MD` | Full pictorial setup guide with SQL snippets and YAML examples |
+| `images/` | Screenshots referenced throughout the guide |
+
+---
+
+### 2. `cortex_eval/` — Cortex Analyst Evaluation Pipeline
 
 An automated evaluation framework for measuring the accuracy and quality of a Snowflake Cortex Analyst semantic model.
 
@@ -43,7 +64,7 @@ python eval_pipeline.py
 
 ---
 
-### 2. `slack-bot-demo/` — Slack Bot for Cortex Agent
+### 3. `slack-bot-demo/` — Slack Bot for Cortex Agent
 
 A Slack bot that exposes a Snowflake Cortex Agent as a conversational interface inside Slack, with persistent thread-level memory.
 
@@ -86,22 +107,103 @@ python app.py
 
 ---
 
-## Architecture Overview
+## Full Workflow
 
 ```
-Slack User
-    |
-    | @mention / /ask
-    v
-slack-bot-demo (Slack Bolt + Socket Mode)
-    |
-    | REST API (SSE stream)
-    v
-Snowflake Cortex Agent
-    |
-    | Semantic view / SQL execution
-    v
-Snowflake Data Warehouse
-```
+ ┌──────────────────────────── PHASE 1: SETUP (setup-snowflake-agent/) ──────────────────────────────┐
+ │                                                                                                     │
+ │   Create Role & Permissions                                                                         │
+ │   Build Semantic View  ──►  Tables · Dimensions · Facts · Metrics · Relationships                  │
+ │   Configure Cortex Agent  ──►  Tools · Orchestration Rules · Response Instructions                 │
+ │   Enable Cross-Region Inference (optional)                                                          │
+ │                                                                                                     │
+ └──────────────────────────────────────────────┬────────────────────────────────────────────────────┘
+                                                │  deploys
+                                                ▼
+                                   ┌─────────────────────────┐
+                                   │     CORTEX AGENT         │
+                                   │   LLM + Routing Layer    │
+                                   │  (plans · selects tool · │
+                                   │   reflects · responds)   │
+                                   └────────┬────────┬────────┘
+                                            │        │
+                              ┌─────────────┘        └──────────────┐
+                              ▼                                      ▼
+                 ┌────────────────────────┐          ┌────────────────────────┐
+                 │    CORTEX ANALYST       │          │    CORTEX SEARCH        │
+                 │   Structured Data       │          │   Unstructured Data     │
+                 │   Natural Language      │          │   Semantic Text Search  │
+                 │      → SQL              │          │                         │
+                 └───────────┬────────────┘          └────────────┬───────────┘
+                             └──────────────┬─────────────────────┘
+                                            ▼
+                                ┌───────────────────────┐
+                                │   SNOWFLAKE DATA WH    │
+                                │   Tables · Views        │
+                                └───────────────────────┘
 
-The `cortex_eval` pipeline independently tests the same Cortex Analyst layer using a golden question set to measure model quality before deploying changes.
+                                            │
+          ┌─────────────────────────────────┴──────────────────────────────────┐
+          │                                                                      │
+          ▼                                                                      ▼
+
+  ┌─────────────────────────────────────────┐    ┌──────────────────────────────────────────────────┐
+  │   PHASE 2: LIVE QUERY (slack-bot-demo/) │    │   PHASE 3: EVALUATION & ITERATION (cortex_eval/) │
+  └─────────────────────────────────────────┘    └──────────────────────────────────────────────────┘
+
+  Slack User                                      Golden Questions  (golden_answers.csv)
+    │  @mention or /ask command                   [ NL question · expected SQL · category · difficulty ]
+    ▼                                                    │
+  Slack Bot  (Socket Mode — no public URL)               ▼
+    │  ① Posts "⏳ Analyzing..." immediately        eval_pipeline.py  ──►  Cortex Analyst API
+    │  ② Calls Cortex Agent REST API                      │
+    │     in background thread (SSE stream)               ├──  Run expected SQL   ──►  Snowflake DW
+    │  ③ Maps Slack thread → Cortex thread_id             └──  Run generated SQL  ──►  Snowflake DW
+    │     (conversation memory per thread)                │
+    │  ④ Edits placeholder with final answer              ▼  Automated Scoring (5 dimensions)
+    ▼                                               ┌──────────────────────────────────────────┐
+  Cortex Agent                                      │  SQL Correctness   (result-set match)     │
+    │  routes to Cortex Analyst or Search           │  Param Accuracy    (tables · columns ·    │
+    ▼                                               │                     filters · aggs · joins)│
+  Snowflake DW  ──►  structured answer              │  Compliance        (timezone · JOIN type · │
+    │                                               │                     revenue col · etc.)    │
+    ▼                                               │  Hallucination     (EXPLAIN schema check)  │
+  Formatted answer posted in Slack thread           │  NL Quality        (0–5 heuristic score)   │
+                                                    └──────────────────────┬───────────────────┘
+                                                                           │
+                                                                           ▼
+                                                                  eval_results.csv
+                                                                  (46 cols · 1 row per question)
+                                                                           │
+                                                                           ▼
+                                                              ┌────────────────────────────┐
+                                                              │      HUMAN IN THE LOOP      │
+                                                              │   Feedback Template (.xlsx) │
+                                                              │                             │
+                                                              │  Review failures by:        │
+                                                              │  · category & difficulty    │
+                                                              │  · hallucination details    │
+                                                              │  · compliance rule failures │
+                                                              │  · low NL quality scores    │
+                                                              └────────────┬───────────────┘
+                                                                           │  identify root causes
+                                                                           ▼
+                                                              ┌────────────────────────────┐
+                                                              │      ITERATE & IMPROVE      │
+                                                              │                             │
+                                                              │  Hallucinations             │
+                                                              │   → fix semantic view cols  │
+                                                              │  Low param accuracy         │
+                                                              │   → add filters / date logic│
+                                                              │  Low compliance             │
+                                                              │   → add coding standards    │
+                                                              │  Low NL quality             │
+                                                              │   → improve response rules  │
+                                                              │  Consistent failures        │
+                                                              │   → add verified examples   │
+                                                              └────────────┬───────────────┘
+                                                                           │
+                                                                           └──────────────────────────►
+                                                                                    Re-deploy · Re-run eval
+                                                                                    Measure delta vs baseline
+```
