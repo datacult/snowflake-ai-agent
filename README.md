@@ -147,28 +147,28 @@ python app.py
           │                                                                      │
           ▼                                                                      ▼
 
-  ┌─────────────────────────────────────────┐    ┌──────────────────────────────────────────────────┐
-  │   PHASE 2: LIVE QUERY (slack-bot-demo/) │    │   PHASE 3: EVALUATION & ITERATION (cortex_eval/) │
-  └─────────────────────────────────────────┘    └──────────────────────────────────────────────────┘
+  ┌──────────────────────────────────────────────────┐    ┌──────────────────────────────────────────────────┐
+  │  PHASE 2: LIVE QUERY (Snowflake Intelligence UI) │    │   PHASE 3: EVALUATION & ITERATION (cortex_eval/) │
+  └──────────────────────────────────────────────────┘    └──────────────────────────────────────────────────┘
 
-  Slack User                                      Golden Questions  (golden_answers.csv)
-    │  @mention or /ask command                   [ NL question · expected SQL · category · difficulty ]
-    ▼                                                    │
-  Slack Bot  (Socket Mode — no public URL)               ▼
-    │  ① Posts "⏳ Analyzing..." immediately        eval_pipeline.py  ──►  Cortex Analyst API
-    │  ② Calls Cortex Agent REST API                      │
-    │     in background thread (SSE stream)               ├──  Run expected SQL   ──►  Snowflake DW
-    │  ③ Maps Slack thread → Cortex thread_id             └──  Run generated SQL  ──►  Snowflake DW
-    │     (conversation memory per thread)                │
-    │  ④ Edits placeholder with final answer              ▼  Automated Scoring (5 dimensions)
-    ▼                                               ┌──────────────────────────────────────────┐
-  Cortex Agent                                      │  SQL Correctness   (result-set match)     │
-    │  routes to Cortex Analyst or Search           │  Param Accuracy    (tables · columns ·    │
-    ▼                                               │                     filters · aggs · joins)│
-  Snowflake DW  ──►  structured answer              │  Compliance        (timezone · JOIN type · │
-    │                                               │                     revenue col · etc.)    │
-    ▼                                               │  Hallucination     (EXPLAIN schema check)  │
-  Formatted answer posted in Slack thread           │  NL Quality        (0–5 heuristic score)   │
+  User (Snowflake Intelligence)                           Golden Questions  (golden_answers.csv)
+    │  Types a question in the chat UI                   [ NL question · expected SQL · category · difficulty ]
+    ▼                                                            │
+  Snowflake Intelligence                                         ▼
+    │  • Native Snowflake chat interface                  eval_pipeline.py  ──►  Cortex Analyst API
+    │  • No external setup required                             │
+    │  • Renders charts, tables, and                            ├──  Run expected SQL   ──►  Snowflake DW
+    │    formatted responses natively                           └──  Run generated SQL  ──►  Snowflake DW
+    │  • Access controlled via Agent                            │
+    │    Access Tab (role-based)                                ▼  Automated Scoring (5 dimensions)
+    ▼                                                     ┌──────────────────────────────────────────┐
+  Cortex Agent                                            │  SQL Correctness   (result-set match)     │
+    │  routes to Cortex Analyst or Search                 │  Param Accuracy    (tables · columns ·    │
+    ▼                                                     │                     filters · aggs · joins)│
+  Snowflake DW  ──►  structured answer                    │  Compliance        (timezone · JOIN type · │
+    │                                                     │                     revenue col · etc.)    │
+    ▼                                                     │  Hallucination     (EXPLAIN schema check)  │
+  Answer rendered in Snowflake Intelligence UI            │  NL Quality        (0–5 heuristic score)   │
                                                     └──────────────────────┬───────────────────┘
                                                                            │
                                                                            ▼
