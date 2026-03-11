@@ -2,10 +2,10 @@ import os
 import threading
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
-from dotenv import load_dotenv
+from aws_secrets import load_secrets
 from cortex_chat import ask_agent
 
-load_dotenv()
+load_secrets("cortex-slack-bot")
 
 app = App(
     token=os.environ['SLACK_BOT_TOKEN'],
