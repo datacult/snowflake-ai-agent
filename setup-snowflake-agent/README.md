@@ -21,6 +21,7 @@ The agent workflow involves four key components:
 USE ROLE ACCOUNTADMIN;
 CREATE ROLE cortex_agent_user_role;
 GRANT DATABASE ROLE SNOWFLAKE.CORTEX_AGENT_USER TO ROLE cortex_agent_user_role;
+CREATE SCHEMA IF NOT EXISTS DB_ATHENA.AI_AGENTS;
 GRANT ROLE cortex_agent_user_role TO USER <whatever-user>;
 
 -- Grant database usage
@@ -29,8 +30,15 @@ GRANT USAGE ON DATABASE ANALYTICS TO ROLE cortex_agent_user_role;
 -- Grant schema usage
 GRANT USAGE ON SCHEMA ANALYTICS.REPORTING TO ROLE cortex_agent_user_role;
 
+--Grant usage on all tables/views
+
+GRANT SELECT ON ALL TABLES IN SCHEMA ANALYTICS.MARTS TO ROLE cortex_agent_user_role;
+GRANT SELECT ON FUTURE TABLES IN SCHEMA ANALYTICS.MART TO ROLE cortex_agent_user_role;
+GRANT USAGE ON WAREHOUSE <WAREHOUSE_NAME> TO ROLE cortex_agent_user_role;
+
 -- Grant SELECT on semantic view -- Run this after you have created a semantic view.
 GRANT SELECT ON VIEW ANALYTICS.REPORTING.<Agent-Created> TO ROLE cortex_agent_user_role;
+
 ```
 
 2. Go to the AI & ML section on the Snowflake UI and click on Agents, then click on Create Agents to create a new Agent.
@@ -470,7 +478,12 @@ These are the following ways you can improve Agent Context:
 
    ![alt text](images/image-12.png)
 
-2. **Custom instructions:** Another area for context building is the custom instructions layer. Here you can include instructions for SQL generation with the example below.
+2. **Custom instructions:** Another area for context building is the custom instructions layer. 
+
+Custom instructions let you have greater control over SQL generation. Using natural language, you can tell Cortex Analyst exactly how to generate SQL queries from within your semantic model YAML file. For example, use custom instructions to tell Cortex Analyst what you mean by performance or financial year. In this way, you can improve the accuracy of the generated SQL by incorporating custom logic or additional elements.
+
+
+Here you can include instructions for SQL generation with the example below.
 
 ```
 # SQL Generation Guidelines
@@ -490,6 +503,36 @@ When analyzing marketing performance:
 ## Adding Cortex Analyst to Cortex Agent
 
 1. Go to Cortex Agent, select tools and click + to add a cortex analyst or search service and select the analyst you have created.
+
+### Tool Description 
+
+Rule 1 - Ensure to start with a clear, specific name for that tool
+
+Rule 2 - Write a good Purpose-driven tool description `what the tool does` + `what data it accesses` + `when to use it` + `when not to use it` 
+
+```
+✅ GOOD EXAMPLE
+
+Name: tool_name
+
+Description: 
+
+Data Coverage: 
+
+When to Use:
+    - 
+    - 
+
+When NOT to Use:
+    - 
+    -
+
+Key Parameters:
+
+```
+
+### Example: Tool Description 
+
 
 ### Agent Orchestration Instructions
 
