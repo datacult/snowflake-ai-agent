@@ -122,7 +122,7 @@ The second optional arg is TRUE, when TRUE is added, this will check if your YAM
 Below is an example query calling the stored procedure.
 
 ```
-ANALYTICSCALL SYSTEM$CREATE_SEMANTIC_VIEW_FRSOM_YAML(
+CALL SYSTEM$CREATE_SEMANTIC_VIEW_FRSOM_YAML(
   'ANALYTICS.REPORTING',
   $$
   name: AGENT_MARKETING_ANALYTICS
