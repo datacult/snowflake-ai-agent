@@ -5,15 +5,18 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 from aws_secrets import load_secrets
 from cortex_chat import ask_agent
 
-load_secrets("cortex-slack-bot")
+load_secrets("SlackAIBotSecret")
 
 app = App(
     token=os.environ['SLACK_BOT_TOKEN'],
     signing_secret=os.environ['SLACK_SIGNING_SECRET'],
 )
 
-# In-memory thread store: maps Slack thread_ts -> Cortex thread_id
-# This ensures each Slack thread maintains its own conversation context
+# Fetch bot's own user ID so the message handler can ignore @mention messages
+# (those are already handled by app_mention)
+bot_user_id = app.client.auth_test()['user_id']
+
+# In-memory thread store: maps Slack thread_ts -> { cortex_thread_id, last_message_id }
 thread_store: dict = {}
 
 # Slack formatting instruction appended to every prompt
@@ -31,18 +34,8 @@ SLACK_FORMAT_INSTRUCTION = (
 )
 
 
-@app.event('app_mention')
-def handle_mention(event, say, client):
-    """Handle @mention of the bot. Always replies in the same Slack thread."""
-    user_text  = event['text']
-    channel_id = event['channel']
-    slack_user = event['user']
-
-    # Use the thread_ts if this is already inside a thread,
-    # otherwise use the message ts to START a new thread
-    slack_thread_ts = event.get('thread_ts') or event['ts']
-
-    # Post thinking indicator IN the thread
+def _run_agent_in_thread(channel_id, slack_user, slack_thread_ts, prompt, client):
+    """Post a thinking indicator, call the agent, then update with the answer."""
     thinking = client.chat_postMessage(
         channel=channel_id,
         thread_ts=slack_thread_ts,
@@ -50,27 +43,26 @@ def handle_mention(event, say, client):
     )
     thinking_ts = thinking['ts']
 
-    # Get existing Cortex thread_id keyed to this Slack thread
-    cortex_thread_id = thread_store.get(slack_thread_ts)
-
-    # Append Slack formatting instruction to the prompt
-    formatted_prompt = user_text + SLACK_FORMAT_INSTRUCTION
+    state            = thread_store.get(slack_thread_ts, {})
+    cortex_thread_id = state.get('cortex_thread_id')
+    last_message_id  = state.get('last_message_id')
+    formatted_prompt = prompt + SLACK_FORMAT_INSTRUCTION
 
     def run_agent():
         try:
-            result    = ask_agent(formatted_prompt, thread_id=cortex_thread_id)
+            result    = ask_agent(formatted_prompt, thread_id=cortex_thread_id, last_message_id=last_message_id)
             answer    = result['text']
             citations = result['citations']
 
-            # Persist Cortex thread_id keyed to this Slack thread
             if result['thread_id']:
-                thread_store[slack_thread_ts] = result['thread_id']
+                thread_store[slack_thread_ts] = {
+                    'cortex_thread_id': result['thread_id'],
+                    'last_message_id':  result.get('message_id'),
+                }
 
-            # Append citations if present
             if citations:
                 answer += '\n\n*Sources:* ' + ', '.join(citations)
 
-            # Update the thinking message with the real answer (stays in thread)
             client.chat_update(
                 channel=channel_id,
                 ts=thinking_ts,
@@ -87,9 +79,43 @@ def handle_mention(event, say, client):
     threading.Thread(target=run_agent, daemon=True).start()
 
 
+@app.event('app_mention')
+def handle_mention(event, say, client):
+    """Handle @mention of the bot. Always replies in the same Slack thread."""
+    slack_thread_ts = event.get('thread_ts') or event['ts']
+    _run_agent_in_thread(event['channel'], event['user'], slack_thread_ts, event['text'], client)
+
+
+@app.event('message')
+def handle_thread_reply(event, client):
+    """
+    Respond to plain replies in a thread the bot is already part of.
+    Users do not need to @mention the bot — just reply in the thread.
+    """
+    # Ignore bot messages, edits, deletes, and any other subtypes
+    if event.get('subtype') or event.get('bot_id'):
+        return
+
+    # Ignore @mentions — app_mention handles those to avoid double responses
+    if f'<@{bot_user_id}>' in event.get('text', ''):
+        return
+
+    slack_thread_ts = event.get('thread_ts')
+
+    # Only respond if this is a reply in a thread the bot started
+    if not slack_thread_ts or slack_thread_ts not in thread_store:
+        return
+
+    _run_agent_in_thread(event['channel'], event['user'], slack_thread_ts, event['text'], client)
+
+
 @app.command('/ask')
 def handle_command(ack, body, client):
-    """Handle /ask slash command. Posts and replies in a thread."""
+    """
+    Handle /ask slash command.
+    - If used inside an existing bot thread: continues that conversation.
+    - Otherwise: starts a new thread.
+    """
     ack()
 
     question   = body.get('text', '').strip()
@@ -103,50 +129,18 @@ def handle_command(ack, body, client):
         )
         return
 
-    # Post the question as the thread root message
+    # If /ask is typed inside an existing bot thread, continue that conversation
+    slack_thread_ts = body.get('thread_ts')
+    if slack_thread_ts and slack_thread_ts in thread_store:
+        _run_agent_in_thread(channel_id, slack_user, slack_thread_ts, question, client)
+        return
+
+    # Otherwise start a fresh thread
     root = client.chat_postMessage(
         channel=channel_id,
         text=f"<@{slack_user}> asked: _{question}_",
     )
-    slack_thread_ts = root['ts']
-
-    # Post thinking indicator inside the thread
-    thinking = client.chat_postMessage(
-        channel=channel_id,
-        thread_ts=slack_thread_ts,
-        text=f"⏳ Analyzing your question, this may take up to 60 seconds...",
-    )
-    thinking_ts = thinking['ts']
-
-    cortex_thread_id = thread_store.get(slack_thread_ts)
-    formatted_prompt = question + SLACK_FORMAT_INSTRUCTION
-
-    def run_agent():
-        try:
-            result    = ask_agent(formatted_prompt, thread_id=cortex_thread_id)
-            answer    = result['text']
-            citations = result['citations']
-
-            if result['thread_id']:
-                thread_store[slack_thread_ts] = result['thread_id']
-
-            if citations:
-                answer += '\n\n*Sources:* ' + ', '.join(citations)
-
-            client.chat_update(
-                channel=channel_id,
-                ts=thinking_ts,
-                text=answer,
-            )
-
-        except Exception as e:
-            client.chat_update(
-                channel=channel_id,
-                ts=thinking_ts,
-                text=f"⚠️ Error: {str(e)}",
-            )
-
-    threading.Thread(target=run_agent, daemon=True).start()
+    _run_agent_in_thread(channel_id, slack_user, root['ts'], question, client)
 
 
 if __name__ == '__main__':

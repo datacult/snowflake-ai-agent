@@ -32,8 +32,8 @@ User types in Slack
 | **Socket Mode** | Bot runs locally with no public URL or ngrok required — Slack opens a WebSocket to your machine |
 | **Threading** | Cortex can take up to 60 seconds; each request runs in a background thread so Slack's 3-second timeout is never hit |
 | **Thinking placeholder** | A "⏳ Analyzing..." message is posted immediately, then edited in-place once the answer arrives |
-| **Thread replies** | All bot responses go into a Slack thread so the channel stays clean. Follow-up `@mentions` inside the thread continue the same conversation |
-| **Thread memory** | Each Slack thread maps to a Cortex `thread_id` so follow-up questions have full conversation context |
+| **Thread replies** | All bot responses go into a Slack thread so the channel stays clean. Users can reply in the thread without @mentioning the bot — the bot listens for all replies in threads it is part of |
+| **Thread memory** | Each Slack thread maps to a Cortex `thread_id` and `last_message_id` so follow-up questions have full conversation context across multiple turns |
 | **SSE streaming** | Cortex streams the response; intermediate "thinking" chunks (`content_index` events) are filtered — only the final `content` block is shown |
 | **Slack formatting** | A system prompt suffix instructs the agent to avoid charts/graphs (unsupported in Slack) and use plain-text tables and bullet points instead |
 
@@ -45,8 +45,9 @@ User types in Slack
 slack-bot-demo/
 ├── app.py            # Slack bot: event handlers, threading, message formatting
 ├── cortex_chat.py    # Snowflake Cortex Agent client (REST + SSE parser)
+├── aws_secrets.py    # Loads secrets from AWS Secrets Manager (EC2 deployment)
 ├── requirements.txt  # Python dependencies
-└── .env              # Secrets (never commit this file)
+└── .env              # Secrets for local development (never commit this file)
 ```
 
 ---
@@ -73,10 +74,15 @@ slack-bot-demo/
    - `app_mentions:read`
    - `chat:write`
    - `commands`
+   - `channels:history` — required to receive `message.channels` events (thread replies)
+   - `groups:history` — same, for private channels
 
 ### Enable Events
 6. Go to **Event Subscriptions → Enable Events → On**.
-7. Under **Subscribe to bot events** add: `app_mention`.
+7. Under **Subscribe to bot events** add:
+   - `app_mention`
+   - `message.channels` — allows the bot to see thread replies without being @mentioned
+   - `message.im` — allows the bot to receive direct messages
 
 ### Add a Slash Command (optional but included)
 8. Go to **Slash Commands → Create New Command**.
@@ -182,9 +188,15 @@ GRANT SELECT ON TABLE ANALYTICS.REPORTING.<MISSING_TABLE>
 
 ---
 
-## Step 4 — Configure the `.env` File
+## Step 4 — Configure Secrets
 
-Create (or edit) `.env` in the project root:
+There are two ways to configure secrets depending on where you are running the bot.
+
+---
+
+### Option A — Local Development (`.env` file)
+
+Create a `.env` file in the project root:
 
 ```dotenv
 # ── Slack ──────────────────────────────────────────────────
@@ -203,6 +215,47 @@ AGENT_NAME=VBB_MARKETING_AGENT_DEMO
 ```
 
 > **Never commit `.env` to git.** Add it to `.gitignore`.
+
+When running locally, load the `.env` file at the top of `app.py` using `python-dotenv`:
+
+```python
+from dotenv import load_dotenv
+load_dotenv()
+```
+
+---
+
+### Option B — EC2 Deployment (AWS Secrets Manager)
+
+When deployed to EC2, secrets are loaded from **AWS Secrets Manager** via `aws_secrets.py` — no `.env` file is needed on the server.
+
+1. Go to **AWS Console → Secrets Manager → Store a new secret**.
+2. Choose **Other type of secret** and add the following key/value pairs:
+
+```
+SLACK_BOT_TOKEN        xoxb-...
+SLACK_SIGNING_SECRET   ...
+SLACK_APP_TOKEN        xapp-...
+SNOWFLAKE_ACCOUNT      abc12345
+SNOWFLAKE_PAT          eyJ...
+AGENT_DATABASE         ANALYTICS
+AGENT_SCHEMA           REPORTING
+AGENT_NAME             VBB_MARKETING_AGENT_DEMO
+```
+
+3. Name the secret (e.g. `SlackAIBotSecret`) — this name is passed to `load_secrets()` in `app.py`.
+
+#### EC2 IAM Permissions
+
+The EC2 instance needs permission to read the secret. Attach an IAM role to the instance with this policy:
+
+```json
+{
+  "Effect": "Allow",
+  "Action": "secretsmanager:GetSecretValue",
+  "Resource": "arn:aws:secretsmanager:<region>:<account-id>:secret:SlackAIBotSecret*"
+}
+```
 
 ---
 
@@ -259,12 +312,12 @@ The bot will:
 This posts your question as a root message in the channel, then replies in that thread with the answer.
 
 ### Follow-up questions in the same thread
-Reply in the same Slack thread with another `@mention`:
+Just reply in the thread — no `@mention` needed:
 ```
-@YourBotName now break that down by channel
+now break that down by channel
 ```
 
-The bot maps each Slack thread to a Cortex `thread_id`, so follow-up questions retain the full conversation context. Starting a new message outside the thread begins a fresh conversation.
+The bot listens for all replies in threads it is part of. Each Slack thread maps to a Cortex `thread_id` and tracks the last `message_id`, so follow-up questions retain the full conversation context. Starting a new message outside the thread begins a fresh conversation.
 
 ### Visualizations
 Charts and graphs are not supported in Slack. The agent formats all data as plain-text tables and bullet points when responding through Slack. If you need visualizations, use the agent directly in **Snowflake Intelligence** where charts render natively.
@@ -278,13 +331,13 @@ Charts and graphs are not supported in Slack. The agent formats all data as plai
 | Section | What it does |
 |---|---|
 | `App(token=..., signing_secret=...)` | Initialises the slack-bolt app |
-| `thread_store: dict` | In-memory map of `slack_thread_ts → cortex_thread_id` for conversation continuity per Slack thread |
+| `bot_user_id` | Fetched once at startup via `auth_test()` — used to detect and skip @mention messages in the `message` handler (those are already handled by `app_mention`) |
+| `thread_store: dict` | In-memory map of `slack_thread_ts → { cortex_thread_id, last_message_id }` for conversation continuity per Slack thread |
 | `SLACK_FORMAT_INSTRUCTION` | String appended to every prompt telling the agent to use Slack-compatible formatting (no charts, plain-text tables, bold numbers with `*asterisks*`) |
+| `_run_agent_in_thread()` | Shared helper — posts the thinking placeholder, looks up thread state, calls the agent in a background thread, updates the message with the answer |
 | `@app.event('app_mention')` | Fires when someone `@mentions` the bot; uses `thread_ts` to always reply in the same Slack thread |
-| `@app.command('/ask')` | Fires when someone uses `/ask`; creates a new thread from the question |
-| `threading.Thread(target=run_agent)` | Runs the Cortex API call in a background thread so Slack's 3-second response window is not exceeded |
-| `client.chat_postMessage(thread_ts=...)` | Posts the "thinking" placeholder inside the thread |
-| `client.chat_update(...)` | Replaces the placeholder with the real answer |
+| `@app.event('message')` | Fires on every channel message; ignores bot messages, subtypes, and @mentions — only responds to plain replies in threads the bot is already part of (no @mention required) |
+| `@app.command('/ask')` | Fires when someone uses `/ask`; continues an existing thread if typed from within one, otherwise starts a new thread |
 | `SocketModeHandler` | Opens a persistent WebSocket to Slack — no public URL needed |
 
 ### `cortex_chat.py` — Cortex Agent Client
@@ -292,8 +345,8 @@ Charts and graphs are not supported in Slack. The agent formats all data as plai
 | Section | What it does |
 |---|---|
 | `get_agent_url()` | Builds the Snowflake REST endpoint from env vars: `https://<account>.snowflakecomputing.com/api/v2/databases/<db>/schemas/<schema>/agents/<name>:run` |
-| `ask_agent(prompt, thread_id)` | POSTs to the Cortex Agent with PAT Bearer token auth, `X-Snowflake-Role` header, and SSE streaming enabled. Passes `thread_id` when continuing a conversation. |
-| `parse_sse(response)` | Iterates SSE `data:` lines. Explicitly ignores intermediate thinking/planning chunks (`content_index` + `text` events — these are internal agent reasoning). Extracts only the final `content` block containing the answer text and citation annotations. Also captures the `thread_id` returned by Cortex for future turns. |
+| `ask_agent(prompt, thread_id, last_message_id)` | POSTs to the Cortex Agent with PAT Bearer token auth, `X-Snowflake-Role` header, and SSE streaming enabled. Passes `thread_id` and `last_message_id` (as `parent_message_id`) when continuing a conversation so Cortex knows exactly which turn to continue from. |
+| `parse_sse(response)` | Iterates SSE `data:` lines. Explicitly ignores intermediate thinking/planning chunks (`content_index` + `text` events — these are internal agent reasoning). Extracts only the final `content` block containing the answer text and citation annotations. Also captures `thread_id` and `message_id` returned by Cortex for use in future turns. |
 
 ---
 

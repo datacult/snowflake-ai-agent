@@ -12,10 +12,10 @@ def get_agent_url():
     )
 
 
-def ask_agent(prompt: str, thread_id=None) -> dict:
+def ask_agent(prompt: str, thread_id=None, last_message_id=None) -> dict:
     """
     Call the Cortex Agent and return:
-      { 'text': str, 'citations': list[str], 'thread_id': int|None }
+      { 'text': str, 'citations': list[str], 'thread_id': int|None, 'message_id': int|None }
     """
     headers = {
         'Authorization':    f'Bearer {os.environ["SNOWFLAKE_PAT"]}',
@@ -29,7 +29,7 @@ def ask_agent(prompt: str, thread_id=None) -> dict:
     }
     if thread_id:
         body['thread_id']         = thread_id
-        body['parent_message_id'] = 0
+        body['parent_message_id'] = last_message_id if last_message_id is not None else 0
 
     resp = requests.post(
         get_agent_url(),
@@ -63,6 +63,7 @@ def parse_sse(response) -> dict:
     final_text  = None
     citations   = []
     thread_id   = None
+    message_id  = None
     errors      = []
 
     for raw in response.iter_lines():
@@ -111,20 +112,25 @@ def parse_sse(response) -> dict:
                         if title:
                             citations.append(title)
 
-        # ── Thread ID (appears in various event shapes) ───────────────────
+        # ── Thread ID and Message ID (appear in various event shapes) ────────
         if 'thread_id' in evt and thread_id is None:
             thread_id = evt['thread_id']
+
+        if 'message_id' in evt and message_id is None:
+            message_id = evt['message_id']
 
     # Surface errors if no final answer arrived
     if errors and not final_text:
         return {
-            'text':      f"⚠️ Agent error: {errors[0]}",
-            'citations': [],
-            'thread_id': thread_id,
+            'text':       f"⚠️ Agent error: {errors[0]}",
+            'citations':  [],
+            'thread_id':  thread_id,
+            'message_id': message_id,
         }
 
     return {
-        'text':      final_text or '(no response)',
-        'citations': citations,
-        'thread_id': thread_id,
+        'text':       final_text or '(no response)',
+        'citations':  citations,
+        'thread_id':  thread_id,
+        'message_id': message_id,
     }
