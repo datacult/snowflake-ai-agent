@@ -67,6 +67,13 @@ GOLDEN_QUESTIONS_FILE = "golden_answers.csv"
 RESULTS_OUTPUT_PATH   = "results/eval_results.csv"
 ```
 
+```bash
+cd cortex_eval
+pip install -r requirements.txt
+# Configure config.py with Snowflake credentials, semantic view name, and file paths
+python eval_pipeline.py
+```
+
 The Snowflake user needs:
 - `CORTEX_USER` role (for Cortex Analyst API access)
 - `SELECT` access to the semantic view and underlying tables
