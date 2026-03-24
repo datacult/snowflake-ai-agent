@@ -26,6 +26,7 @@ For each question in your golden set, the pipeline:
 cortex_eval/
 ├── config.py                          # Snowflake credentials & configuration
 ├── eval_pipeline.py                   # Main evaluation engine
+├── results.py                         # result util functions
 ├── requirements.txt                   # Python dependencies
 ├── golden_answers.csv                 # Input: question bank with expected SQL
 ├── credentials/                       # API credentials (gitignored)
@@ -71,7 +72,7 @@ RESULTS_OUTPUT_PATH   = "results/eval_results.csv"
 cd cortex_eval
 pip install -r requirements.txt
 # Configure config.py with Snowflake credentials, semantic view name, and file paths
-python eval_pipeline.py
+python eval_pipeline.py --name baseline
 ```
 
 The Snowflake user needs:

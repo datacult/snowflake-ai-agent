@@ -16,6 +16,7 @@ Requirements:
 import re
 import json
 import time
+import argparse
 import hashlib
 import logging
 from datetime import datetime, timezone
@@ -38,8 +39,8 @@ from config import (
     SNOWFLAKE_SCHEMA,
     SEMANTIC_VIEW,
     GOLDEN_QUESTIONS_FILE,
-    RESULTS_OUTPUT_PATH,
 )
+from results import check_duplicate_name, save_results, save_manifest
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -1059,23 +1060,35 @@ def generate_report(results: list[EvalResult]) -> pd.DataFrame:
     return df
 
 
-def save_results(df: pd.DataFrame, output_path: str):
-    """Save detailed results to CSV."""
-    df.to_csv(output_path, index=False)
-    logger.info(f"Results saved to {output_path}")
-
-
 # =============================================================================
 # Entry point
 # =============================================================================
 def main():
-    logger.info("Starting Cortex Analyst evaluation pipeline...")
+    parser = argparse.ArgumentParser(description="Cortex Analyst Evaluation Pipeline")
+    parser.add_argument(
+        "--name",
+        required=True,
+        help="Short name for this eval run, e.g. 'baseline' or 'updated_roas_docs'",
+    )
+    args = parser.parse_args()
+
+    name = args.name.strip().replace(" ", "_")
+
+    # Guard: fail fast on duplicate name
+    if check_duplicate_name(name):
+        logger.error(
+            f"A run named '{name}' already exists in the manifest. "
+            "Choose a different name or check results/manifest.csv."
+        )
+        return
+
+    logger.info(f"Starting Cortex Analyst evaluation — run: '{name}'")
 
     # Load golden questions
     questions = load_golden_questions(GOLDEN_QUESTIONS_FILE)
 
     if not questions:
-        logger.error("No questions loaded. Check your Excel file.")
+        logger.error("No questions loaded. Check your CSV file.")
         return
 
     # Run evaluation
@@ -1084,10 +1097,11 @@ def main():
     # Generate report
     df = generate_report(results)
 
-    # Save detailed results
-    save_results(df, RESULTS_OUTPUT_PATH)
+    # Save detailed results + update manifest
+    output_path = save_results(df, name)
+    save_manifest(df, name, output_path)
 
-    logger.info("Evaluation complete.")
+    logger.info(f"Evaluation complete. Results: {output_path}")
 
 
 if __name__ == "__main__":

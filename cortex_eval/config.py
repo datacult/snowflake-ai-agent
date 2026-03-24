@@ -29,4 +29,4 @@ GOLDEN_QUESTIONS_FILE = "golden_answers.csv"
 # =============================================================================
 # Output
 # =============================================================================
-RESULTS_OUTPUT_PATH = "results/eval_results.csv"
+RESULTS_DIR ="results"
