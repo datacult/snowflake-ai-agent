@@ -2,6 +2,13 @@
 
 This repository contains three projects for setting up, building, and evaluating AI-powered analytics on top of Snowflake Cortex.
 
+| Project | Description |
+|---------|-------------|
+| [`setup-snowflake-agent/`](setup-snowflake-agent/) | Step-by-step guide for configuring Snowflake Cortex Agent — roles, semantic views, and agent setup |
+| [`cortex_eval/`](cortex_eval/) | Automated evaluation pipeline that scores Cortex Analyst responses against golden question sets |
+| [`slack-bot-demo/`](slack-bot-demo/) | Slack bot that exposes your Cortex Agent as a conversational interface with thread-level memory |
+| [`snowflake-mcp-server-setup/`](snowflake-mcp-server-setup/) | Setup guide for connecting Snowflake to Claude.ai via MCP — OAuth config, server creation, and user onboarding |
+
 ---
 
 ## Projects
