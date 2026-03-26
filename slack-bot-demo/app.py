@@ -4,6 +4,7 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from aws_secrets import load_secrets
 from cortex_chat import ask_agent
+from thread_store import get_history, save_history
 
 load_secrets("SlackAIBotSecret")
 
@@ -16,8 +17,8 @@ app = App(
 # (those are already handled by app_mention)
 bot_user_id = app.client.auth_test()['user_id']
 
-# In-memory thread store: maps Slack thread_ts -> { cortex_thread_id, last_message_id }
-thread_store: dict = {}
+# Thread state is persisted in DynamoDB (SlackBotThreadStore table).
+# get_thread / put_thread replace the former in-memory dict.
 
 # Slack formatting instruction appended to every prompt
 SLACK_FORMAT_INSTRUCTION = (
@@ -33,6 +34,34 @@ SLACK_FORMAT_INSTRUCTION = (
     "- End with a 1-2 sentence insight summarizing the trend."
 )
 
+# CSV format instruction — used when the user explicitly asks for a CSV file.
+# Asks Cortex to return insights first, then the raw CSV separated by a delimiter.
+CSV_FORMAT_INSTRUCTION = (
+    "\n\n[RESPONSE FORMAT - CSV + SLACK]\n"
+    "Return your response in TWO parts separated by the exact delimiter: ---CSV---\n\n"
+    "Part 1 (before the delimiter): Normal Slack-formatted insights.\n"
+    "- Do NOT reference charts, visualizations, or graphs.\n"
+    "- Use bullet points or numbered lists for summaries.\n"
+    "- Bold key numbers using *asterisks* e.g. *$353,456*.\n"
+    "- End with a 1-2 sentence insight summarizing the trend.\n\n"
+    "Part 2 (after the delimiter): Raw CSV data only.\n"
+    "- First line must be a header row with column names.\n"
+    "- No markdown, no code blocks, no extra text — just the CSV rows.\n\n"
+    "Example:\n"
+    "Here are the results:\n"
+    "- *$100k* in January\n"
+    "---CSV---\n"
+    "month,revenue\n"
+    "January,100000\n"
+)
+
+CSV_KEYWORDS = ('csv file', 'as a csv', 'export csv', 'download csv', 'export as csv', 'in csv', 'as csv')
+
+
+def _is_csv_request(text: str) -> bool:
+    lower = text.lower()
+    return any(kw in lower for kw in CSV_KEYWORDS)
+
 
 def _run_agent_in_thread(channel_id, slack_user, slack_thread_ts, prompt, client):
     """Post a thinking indicator, call the agent, then update with the answer."""
@@ -43,31 +72,59 @@ def _run_agent_in_thread(channel_id, slack_user, slack_thread_ts, prompt, client
     )
     thinking_ts = thinking['ts']
 
-    state            = thread_store.get(slack_thread_ts, {})
-    cortex_thread_id = state.get('cortex_thread_id')
-    last_message_id  = state.get('last_message_id')
-    formatted_prompt = prompt + SLACK_FORMAT_INSTRUCTION
+    history       = get_history(slack_thread_ts)
+    csv_requested = _is_csv_request(prompt)
+    format_instr  = CSV_FORMAT_INSTRUCTION if csv_requested else SLACK_FORMAT_INSTRUCTION
+    formatted_prompt = prompt + format_instr
 
     def run_agent():
         try:
-            result    = ask_agent(formatted_prompt, thread_id=cortex_thread_id, last_message_id=last_message_id)
+            result    = ask_agent(formatted_prompt, history=history)
             answer    = result['text']
             citations = result['citations']
 
-            if result['thread_id']:
-                thread_store[slack_thread_ts] = {
-                    'cortex_thread_id': result['thread_id'],
-                    'last_message_id':  result.get('message_id'),
-                }
+            # Save history using the original prompt (no format instructions) so
+            # Cortex sees clean context on follow-ups. For CSV responses store
+            # only the insights part, not the raw CSV rows.
+            assistant_text = answer.split('---CSV---', 1)[0].strip() if csv_requested else answer
+            save_history(slack_thread_ts, history + [
+                {'role': 'user',      'content': [{'type': 'text', 'text': prompt}]},
+                {'role': 'assistant', 'content': [{'type': 'text', 'text': assistant_text}]},
+            ])
 
-            if citations:
-                answer += '\n\n*Sources:* ' + ', '.join(citations)
+            if csv_requested:
+                # Split the response into insights and CSV data
+                parts    = answer.split('---CSV---', 1)
+                insights = parts[0].strip()
+                csv_data = parts[1].strip() if len(parts) > 1 else ''
 
-            client.chat_update(
-                channel=channel_id,
-                ts=thinking_ts,
-                text=f"<@{slack_user}> {answer}",
-            )
+                # Update the thinking message with the insights
+                if citations:
+                    insights += '\n\n*Sources:* ' + ', '.join(citations)
+                client.chat_update(
+                    channel=channel_id,
+                    ts=thinking_ts,
+                    text=f"<@{slack_user}> {insights}",
+                )
+
+                # Upload the CSV as a file in the same thread
+                if csv_data:
+                    client.files_upload_v2(
+                        channel=channel_id,
+                        thread_ts=slack_thread_ts,
+                        filename="data.csv",
+                        content=csv_data,
+                        title="Raw Data Export",
+                    )
+            else:
+                if citations:
+                    answer += '\n\n*Sources:* ' + ', '.join(citations)
+
+                client.chat_update(
+                    channel=channel_id,
+                    ts=thinking_ts,
+                    text=f"<@{slack_user}> {answer}",
+                )
 
         except Exception as e:
             client.chat_update(
@@ -103,7 +160,7 @@ def handle_thread_reply(event, client):
     slack_thread_ts = event.get('thread_ts')
 
     # Only respond if this is a reply in a thread the bot started
-    if not slack_thread_ts or slack_thread_ts not in thread_store:
+    if not slack_thread_ts or not get_history(slack_thread_ts):
         return
 
     _run_agent_in_thread(event['channel'], event['user'], slack_thread_ts, event['text'], client)
@@ -131,7 +188,7 @@ def handle_command(ack, body, client):
 
     # If /ask is typed inside an existing bot thread, continue that conversation
     slack_thread_ts = body.get('thread_ts')
-    if slack_thread_ts and slack_thread_ts in thread_store:
+    if slack_thread_ts and get_history(slack_thread_ts):
         _run_agent_in_thread(channel_id, slack_user, slack_thread_ts, question, client)
         return
 

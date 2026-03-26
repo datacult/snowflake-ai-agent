@@ -16,9 +16,6 @@ env/
 # Credentials
 credentials/
 
-# Results / outputs
-results/
-
 # Jupyter
 .ipynb_checkpoints/
 

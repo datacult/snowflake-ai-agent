@@ -16,10 +16,17 @@ User types in Slack
   app.py  ←── slack-bolt (Socket Mode, no public URL needed)
        │
        ▼
+  thread_store.py  ──► DynamoDB (fetch conversation history)
+       │
+       ▼
   cortex_chat.py  ──► Snowflake Cortex Agent REST API (SSE stream)
+                       (full message history included in every request)
        │
        ▼
   Parse SSE response (extract final answer + citations)
+       │
+       ▼
+  Save updated history to DynamoDB
        │
        ▼
   Update Slack message with the answer (in the same thread)
@@ -32,10 +39,11 @@ User types in Slack
 | **Socket Mode** | Bot runs locally with no public URL or ngrok required — Slack opens a WebSocket to your machine |
 | **Threading** | Cortex can take up to 60 seconds; each request runs in a background thread so Slack's 3-second timeout is never hit |
 | **Thinking placeholder** | A "⏳ Analyzing..." message is posted immediately, then edited in-place once the answer arrives |
-| **Thread replies** | All bot responses go into a Slack thread so the channel stays clean. Users can reply in the thread without @mentioning the bot — the bot listens for all replies in threads it is part of |
-| **Thread memory** | Each Slack thread maps to a Cortex `thread_id` and `last_message_id` so follow-up questions have full conversation context across multiple turns |
+| **Thread replies** | All bot responses go into a Slack thread so the channel stays clean. Follow-up messages inside the thread continue the same conversation |
+| **Conversation history in DynamoDB** | The Cortex Agent public REST API does not return a `thread_id` — conversation context is managed by storing the full message history in DynamoDB and including it in every API call. History is capped at 20 messages and auto-expires after 7 days via TTL. |
 | **SSE streaming** | Cortex streams the response; intermediate "thinking" chunks (`content_index` events) are filtered — only the final `content` block is shown |
 | **Slack formatting** | A system prompt suffix instructs the agent to avoid charts/graphs (unsupported in Slack) and use plain-text tables and bullet points instead |
+| **CSV export** | When a user asks for output "as a csv file", the bot returns both the insights as a Slack message and a downloadable `data.csv` file attached to the thread |
 
 ---
 
@@ -45,9 +53,10 @@ User types in Slack
 slack-bot-demo/
 ├── app.py            # Slack bot: event handlers, threading, message formatting
 ├── cortex_chat.py    # Snowflake Cortex Agent client (REST + SSE parser)
-├── aws_secrets.py    # Loads secrets from AWS Secrets Manager (EC2 deployment)
+├── thread_store.py   # DynamoDB-backed conversation history store
+├── aws_secrets.py    # Loads secrets from AWS Secrets Manager into env vars
 ├── requirements.txt  # Python dependencies
-└── .env              # Secrets for local development (never commit this file)
+└── .env              # Secrets for local dev (never commit this file)
 ```
 
 ---
@@ -57,6 +66,7 @@ slack-bot-demo/
 - Python 3.9+
 - A **Snowflake account** with a Cortex Agent already created in Snowflake Intelligence
 - A **Slack workspace** where you have permission to install apps
+- An **AWS account** with access to Secrets Manager and DynamoDB
 
 ---
 
@@ -74,15 +84,11 @@ slack-bot-demo/
    - `app_mentions:read`
    - `chat:write`
    - `commands`
-   - `channels:history` — required to receive `message.channels` events (thread replies)
-   - `groups:history` — same, for private channels
+   - `files:write`
 
 ### Enable Events
 6. Go to **Event Subscriptions → Enable Events → On**.
-7. Under **Subscribe to bot events** add:
-   - `app_mention`
-   - `message.channels` — allows the bot to see thread replies without being @mentioned
-   - `message.im` — allows the bot to receive direct messages
+7. Under **Subscribe to bot events** add: `app_mention`.
 
 ### Add a Slash Command (optional but included)
 8. Go to **Slash Commands → Create New Command**.
@@ -188,49 +194,57 @@ GRANT SELECT ON TABLE ANALYTICS.REPORTING.<MISSING_TABLE>
 
 ---
 
-## Step 4 — Configure Secrets
+## Step 4 — Set Up DynamoDB for Conversation History
 
-There are two ways to configure secrets depending on where you are running the bot.
+The bot stores conversation history in DynamoDB so follow-up questions retain context even after restarts.
+
+### Create the Table
+
+1. Go to **AWS Console → DynamoDB → Tables → Create table**.
+2. Set:
+   - **Table name:** `SlackBotThreadStore`
+   - **Partition key:** `thread_ts` (String)
+   - **Table settings:** Default (On-demand capacity)
+3. Click **Create table**.
+
+### Enable TTL (auto-expire old conversations)
+
+1. Open the table → go to the **Additional settings** tab.
+2. Scroll to **Time to Live (TTL)** and click **Enable**.
+3. Set the attribute name to `expires_at`.
+
+### Grant DynamoDB Permissions to the Bot
+
+The IAM role or user the bot runs as needs permission to read and write to this table. Add the following inline policy:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:PutItem"
+      ],
+      "Resource": "arn:aws:dynamodb:us-east-1:YOUR_ACCOUNT_ID:table/SlackBotThreadStore"
+    }
+  ]
+}
+```
+
+Replace `us-east-1` with your region and `YOUR_ACCOUNT_ID` with your AWS account number.
+
+To find the identity the bot is using, run:
+```bash
+aws sts get-caller-identity
+```
 
 ---
 
-### Option A — Local Development (`.env` file)
+## Step 5 — Configure Secrets
 
-Create a `.env` file in the project root:
-
-```dotenv
-# ── Slack ──────────────────────────────────────────────────
-SLACK_BOT_TOKEN=xoxb-...
-SLACK_SIGNING_SECRET=...
-SLACK_APP_TOKEN=xapp-...
-
-# ── Snowflake ──────────────────────────────────────────────
-SNOWFLAKE_ACCOUNT=abc12345
-SNOWFLAKE_PAT=eyJ...
-
-# ── Cortex Agent ───────────────────────────────────────────
-AGENT_DATABASE=ANALYTICS
-AGENT_SCHEMA=REPORTING
-AGENT_NAME=VBB_MARKETING_AGENT_DEMO
-```
-
-> **Never commit `.env` to git.** Add it to `.gitignore`.
-
-When running locally, load the `.env` file at the top of `app.py` using `python-dotenv`:
-
-```python
-from dotenv import load_dotenv
-load_dotenv()
-```
-
----
-
-### Option B — EC2 Deployment (AWS Secrets Manager)
-
-When deployed to EC2, secrets are loaded from **AWS Secrets Manager** via `aws_secrets.py` — no `.env` file is needed on the server.
-
-1. Go to **AWS Console → Secrets Manager → Store a new secret**.
-2. Choose **Other type of secret** and add the following key/value pairs:
+The bot loads all secrets from **AWS Secrets Manager** at startup. Create a secret named `SlackAIBotSecret` with the following key/value pairs:
 
 ```
 SLACK_BOT_TOKEN        xoxb-...
@@ -243,28 +257,29 @@ AGENT_SCHEMA           REPORTING
 AGENT_NAME             VBB_MARKETING_AGENT_DEMO
 ```
 
-3. Name the secret (e.g. `SlackAIBotSecret`) — this name is passed to `load_secrets()` in `app.py`.
+For **local development**, you can create a `.env` file in the project root as a fallback (the bot will use it if Secrets Manager is unavailable):
 
-#### EC2 IAM Permissions
-
-The EC2 instance needs permission to read the secret. Attach an IAM role to the instance with this policy:
-
-```json
-{
-  "Effect": "Allow",
-  "Action": "secretsmanager:GetSecretValue",
-  "Resource": "arn:aws:secretsmanager:<region>:<account-id>:secret:SlackAIBotSecret*"
-}
+```dotenv
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_SIGNING_SECRET=...
+SLACK_APP_TOKEN=xapp-...
+SNOWFLAKE_ACCOUNT=abc12345
+SNOWFLAKE_PAT=eyJ...
+AGENT_DATABASE=ANALYTICS
+AGENT_SCHEMA=REPORTING
+AGENT_NAME=VBB_MARKETING_AGENT_DEMO
 ```
+
+> **Never commit `.env` to git.** Add it to `.gitignore`.
 
 ---
 
-## Step 5 — Install Dependencies & Run
+## Step 6 — Install Dependencies & Run
 
 ```bash
 # Create a virtual environment (recommended)
-python3 -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
+python3 -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
 
 # Install packages
 pip install -r requirements.txt
@@ -276,6 +291,7 @@ python app.py
 You should see:
 
 ```
+Secrets loaded from AWS Secrets Manager: SlackAIBotSecret
 Bot starting...
 ⚡️ Bolt app is running!
 ```
@@ -312,12 +328,27 @@ The bot will:
 This posts your question as a root message in the channel, then replies in that thread with the answer.
 
 ### Follow-up questions in the same thread
-Just reply in the thread — no `@mention` needed:
+Reply in the same Slack thread:
+```
+@YourBotName now break that down by channel
+```
+
+Or simply reply without mentioning the bot (if you are replying in a thread the bot started):
 ```
 now break that down by channel
 ```
 
-The bot listens for all replies in threads it is part of. Each Slack thread maps to a Cortex `thread_id` and tracks the last `message_id`, so follow-up questions retain the full conversation context. Starting a new message outside the thread begins a fresh conversation.
+The bot includes the full conversation history in every Cortex API call, so follow-up questions retain the full context of the thread. Starting a new message outside the thread begins a fresh conversation.
+
+### Request a CSV export
+Add any of the following phrases to your question:
+```
+@YourBotName show me last month's revenue by channel as a csv file
+```
+
+The bot will return:
+1. The normal insights as a Slack message in the thread
+2. A downloadable `data.csv` file attached to the same thread
 
 ### Visualizations
 Charts and graphs are not supported in Slack. The agent formats all data as plain-text tables and bullet points when responding through Slack. If you need visualizations, use the agent directly in **Snowflake Intelligence** where charts render natively.
@@ -331,13 +362,15 @@ Charts and graphs are not supported in Slack. The agent formats all data as plai
 | Section | What it does |
 |---|---|
 | `App(token=..., signing_secret=...)` | Initialises the slack-bolt app |
-| `bot_user_id` | Fetched once at startup via `auth_test()` — used to detect and skip @mention messages in the `message` handler (those are already handled by `app_mention`) |
-| `thread_store: dict` | In-memory map of `slack_thread_ts → { cortex_thread_id, last_message_id }` for conversation continuity per Slack thread |
 | `SLACK_FORMAT_INSTRUCTION` | String appended to every prompt telling the agent to use Slack-compatible formatting (no charts, plain-text tables, bold numbers with `*asterisks*`) |
-| `_run_agent_in_thread()` | Shared helper — posts the thinking placeholder, looks up thread state, calls the agent in a background thread, updates the message with the answer |
+| `CSV_FORMAT_INSTRUCTION` | Alternative prompt suffix used when the user asks for CSV output — instructs Cortex to return insights + raw CSV separated by `---CSV---` |
 | `@app.event('app_mention')` | Fires when someone `@mentions` the bot; uses `thread_ts` to always reply in the same Slack thread |
-| `@app.event('message')` | Fires on every channel message; ignores bot messages, subtypes, and @mentions — only responds to plain replies in threads the bot is already part of (no @mention required) |
-| `@app.command('/ask')` | Fires when someone uses `/ask`; continues an existing thread if typed from within one, otherwise starts a new thread |
+| `@app.event('message')` | Fires on plain thread replies — responds only if the thread already has history in DynamoDB |
+| `@app.command('/ask')` | Fires when someone uses `/ask`; creates a new thread from the question |
+| `threading.Thread(target=run_agent)` | Runs the Cortex API call in a background thread so Slack's 3-second response window is not exceeded |
+| `client.chat_postMessage(thread_ts=...)` | Posts the "thinking" placeholder inside the thread |
+| `client.chat_update(...)` | Replaces the placeholder with the real answer |
+| `client.files_upload_v2(...)` | Uploads the CSV file to the thread when a CSV export is requested |
 | `SocketModeHandler` | Opens a persistent WebSocket to Slack — no public URL needed |
 
 ### `cortex_chat.py` — Cortex Agent Client
@@ -345,8 +378,21 @@ Charts and graphs are not supported in Slack. The agent formats all data as plai
 | Section | What it does |
 |---|---|
 | `get_agent_url()` | Builds the Snowflake REST endpoint from env vars: `https://<account>.snowflakecomputing.com/api/v2/databases/<db>/schemas/<schema>/agents/<name>:run` |
-| `ask_agent(prompt, thread_id, last_message_id)` | POSTs to the Cortex Agent with PAT Bearer token auth, `X-Snowflake-Role` header, and SSE streaming enabled. Passes `thread_id` and `last_message_id` (as `parent_message_id`) when continuing a conversation so Cortex knows exactly which turn to continue from. |
-| `parse_sse(response)` | Iterates SSE `data:` lines. Explicitly ignores intermediate thinking/planning chunks (`content_index` + `text` events — these are internal agent reasoning). Extracts only the final `content` block containing the answer text and citation annotations. Also captures `thread_id` and `message_id` returned by Cortex for use in future turns. |
+| `ask_agent(prompt, history)` | Builds the full `messages` array from prior history + current prompt, then POSTs to the Cortex Agent with PAT Bearer token auth and SSE streaming enabled |
+| `parse_sse(response)` | Iterates SSE `data:` lines. Explicitly ignores intermediate thinking/planning chunks (`content_index` + `text` events). Extracts only the final `content` block containing the answer text and citation annotations |
+
+### `thread_store.py` — Conversation History
+
+| Section | What it does |
+|---|---|
+| `get_history(thread_ts)` | Fetches the conversation message list for a Slack thread from DynamoDB |
+| `save_history(thread_ts, messages)` | Writes the updated message list to DynamoDB with a 7-day TTL. Caps at 20 messages to stay within DynamoDB's item size limits |
+
+> **Why not use Cortex's built-in thread_id?** The Cortex Agent public REST API does not return a `thread_id` in its SSE response (confirmed via Snowflake monitoring traces). Thread state must be managed by the caller. Snowflake Intelligence uses an internal API that handles this automatically — the public API does not.
+
+### `aws_secrets.py` — Secrets Loader
+
+Fetches the `SlackAIBotSecret` JSON secret from AWS Secrets Manager on startup and injects every key into `os.environ`. Falls back to `.env` (via python-dotenv) if AWS is unavailable, making local development straightforward.
 
 ---
 
@@ -359,13 +405,16 @@ Charts and graphs are not supported in Slack. The agent formats all data as plai
 | `400 Bad Request` | Request body format issue or role doesn't have access to the agent object | Check `X-Snowflake-Role` header is set; grant USAGE on the agent object to your role |
 | `401 Unauthorized` | PAT has expired or wrong role was selected when creating the PAT | Generate a new PAT in Snowsight, make sure to select the correct role |
 | `403 Forbidden` | Role missing `SNOWFLAKE.CORTEX_AGENT_USER` database role | `GRANT DATABASE ROLE SNOWFLAKE.CORTEX_AGENT_USER TO ROLE <your_role>` |
+| `missing_scope: files:write` | Bot is missing the `files:write` Slack scope | Add `files:write` in Slack app OAuth scopes and reinstall the app |
 | `Semantic model failed validation: table does not exist or not authorized` | The role has no SELECT on one or more tables referenced in the semantic view | Run `SHOW GRANTS TO ROLE <your_role>` and compare against tables in the semantic view. Grant any missing tables individually |
 | Bot posts the agent's internal reasoning ("Let me analyze...") | SSE parser was accumulating `content_index` delta chunks instead of waiting for the final `content` block | The `parse_sse` function explicitly skips `content_index` events — make sure you're using the latest `cortex_chat.py` |
 | `(no response)` in Slack | The SSE stream returned no final `content` block — usually means the agent hit an internal error | Add `print(f"SSE event: {payload[:200]}")` in `parse_sse` to log raw events and diagnose |
 | Bot replies but says "technical database connection issue" | The agent's SQL query failed silently — permissions issue or bad SQL generation | Run the query manually in a Snowflake worksheet using the role the PAT uses to confirm it works |
 | Bot doesn't respond to mentions | `app_mention` event not enabled, or bot not invited to the channel | Enable event in Slack app settings; run `/invite @YourBotName` in the channel |
+| Bot doesn't respond to thread replies | The thread has no history in DynamoDB (e.g., bot was restarted mid-thread) | Start a new thread with an `@mention` or `/ask` |
 | Slack timeout — bot never replies | Cortex call is taking longer than Slack expects | The background `threading.Thread` pattern handles this — make sure `ack()` or `chat_postMessage` fires before the agent call starts |
-| `MissingSchema: Invalid URL` | `SNOWFLAKE_ACCOUNT` env var is missing or malformed | Check `.env` — account should be just the identifier e.g. `abc12345`, not the full URL |
+| `MissingSchema: Invalid URL` | `SNOWFLAKE_ACCOUNT` env var is missing or malformed | Check secrets — account should be just the identifier e.g. `abc12345`, not the full URL |
+| DynamoDB `AccessDeniedException` | IAM role/user missing `dynamodb:GetItem` or `dynamodb:PutItem` | Add the inline DynamoDB policy to the IAM role the bot runs as |
 
 ### Debugging the SSE Stream
 
@@ -406,12 +455,13 @@ GRANT SELECT ON TABLE ANALYTICS.REPORTING.<MISSING_TABLE>
 
 ## Security Notes
 
-- The `.env` file contains sensitive tokens. **Never push it to a public repository.** Add `.env` to your `.gitignore`.
-- The Snowflake PAT has an expiry date — rotate it before it expires to avoid downtime. The default expiry is short; set a longer one if running continuously.
+- Secrets are loaded from **AWS Secrets Manager** at startup — never hardcoded or committed to git.
+- The `.env` file is a local development fallback only. Add it to `.gitignore` and never push it.
+- The Snowflake PAT has an expiry date — rotate it before it expires to avoid downtime.
 - PATs are scoped to a role at creation time. Use the most restrictive role possible — avoid creating PATs with `ACCOUNTADMIN`.
-- The `X-Snowflake-Role` header in `cortex_chat.py` explicitly sets the role for every API call. This must match the role the PAT was created for, otherwise you'll get permission errors.
+- The `X-Snowflake-Role` header in `cortex_chat.py` explicitly sets the role for every API call. This must match the role the PAT was created for.
 - The Slack Bolt SDK validates request signatures automatically using `SLACK_SIGNING_SECRET`. Keep this secret secure.
-- `thread_store` is in-memory and resets when the bot restarts. For production, persist thread IDs to Redis or a Snowflake table so conversation context survives restarts.
+- DynamoDB stores only the conversation text — no credentials or PII beyond what users type in Slack. Data auto-expires after 7 days via TTL.
 
 ---
 
@@ -421,5 +471,5 @@ Your PAT expires on the date shown in Snowsight under your profile → Settings 
 
 1. Go to Snowsight → your profile → **Settings → Authentication**.
 2. Click **Generate new token**, select the same role (`CORTEX_AGENT_USER_ROLE`), set a new expiry.
-3. Copy the new token and update `SNOWFLAKE_PAT` in your `.env` file.
+3. Update `SNOWFLAKE_PAT` in your AWS Secrets Manager secret.
 4. Restart the bot.
