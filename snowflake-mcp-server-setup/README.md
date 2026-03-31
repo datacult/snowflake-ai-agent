@@ -16,7 +16,7 @@ Snowflake currently supports 5 tool types on the MCP server:
 |-----------|---------|
 | `CORTEX_ANALYST_MESSAGE` | Cortex Analyst — natural language to SQL via semantic models |
 | `CORTEX_AGENT_RUN` | Cortex Agent — orchestrates across multiple tools |
-| `SYSTEM_EXECUTE_SQL` | Direct SQL execution against the connected database |
+| `SYSTEM_EXECUTE_SQL` | Direct SQL execution against the connected database. Note that you most likely would not need this tool as it gives users access to query any table in the database. |
 | `CORTEX_SEARCH_SERVICE_QUERY` | Cortex Search Service for unstructured data retrieval |
 | `GENERIC` | Custom UDFs and stored procedures |
 
@@ -37,11 +37,6 @@ CREATE OR REPLACE MCP SERVER <database>.<schema>.<mcp_server_name>
         type: "CORTEX_ANALYST_MESSAGE"
         identifier: "<database>.<schema>.<semantic_view_name>"
         description: "Cortex Analyst that handles queries around performance marketing e.g. ROAS, CAC, spend, revenue, etc."
-
-      - title: "SQL Execution Tool"
-        name: "sql_exec_tool"
-        type: "SYSTEM_EXECUTE_SQL"
-        description: "A tool to execute SQL queries against the connected Snowflake database."
 
       - title: "Cortex Agent"
         name: "cortex-Agent"
@@ -114,7 +109,7 @@ https://<account_identifier>.snowflakecomputing.com/api/v2/databases/<database>/
 Grant `USAGE` on the MCP server to the role that will be used by connecting users. This role should also have access to the underlying database, schema, warehouse, and any Cortex services.
 
 ```sql
--- Grant MCP server access to the role
+-- Grant MCP server access to the role or any role that users who are using it are on. 
 GRANT USAGE ON MCP SERVER <database>.<schema>.<mcp_server_name>
   TO ROLE <role_name>;
 
@@ -129,6 +124,7 @@ GRANT USAGE ON WAREHOUSE <warehouse_name> TO ROLE <role_name>;
 ### Step 6: Set the user's default role
 
 Each user connecting via Claude should have their default role set to the role with MCP access.
+This applies when you are just creating a user for the sake of connecting to the MCP Server. If a user already exists with another role, grant the users role usage to the mcp server in step 5
 
 ```sql
 ALTER USER <username> SET DEFAULT_ROLE = '<role_name>';
@@ -158,30 +154,12 @@ ALTER NETWORK POLICY <policy_name> SET
 
 ---
 
-### Step 8: Add delegated authorization for each user
+### Step 8: Show delegated authorization to Server
 
-Each user who connects to the MCP server through Claude's OAuth integration needs delegated authorization. **This must be done per user** — there is no role-level shortcut.
-
-```sql
-ALTER USER <username> ADD DELEGATED AUTHORIZATION
-  OF ROLE <role_name>
-  TO SECURITY INTEGRATION <integration_name>;
-```
-
-**Example:**
+See users that have access to the MCP Server
 
 ```sql
-ALTER USER DAVIDEFFIONG ADD DELEGATED AUTHORIZATION
-  OF ROLE CORTEX_AGENT_USER_ROLE
-  TO SECURITY INTEGRATION CLAUDE_MCP_OAUTH;
-```
-
-**To remove delegated authorization:**
-
-```sql
-ALTER USER <username> REMOVE DELEGATED AUTHORIZATION
-  OF ROLE <role_name>
-  TO SECURITY INTEGRATION <integration_name>;
+SHOW DELEGATED AUTHORIZATIONS TO SECURITY INTEGRATION CLAUDE_MCP_OAUTH;
 ```
 
 ---
@@ -189,6 +167,8 @@ ALTER USER <username> REMOVE DELEGATED AUTHORIZATION
 ### Step 9: Share connection details with users
 
 Provide each user with the following to connect from Claude.ai:
+
+For clients with Claude Team access, the Claude Admin will just use this detail to create the snowflake connection and other users will just connect and authenticate with snowflake. 
 
 1. **MCP server URL** (from step 4)
 2. **OAuth client ID** (from step 3)
@@ -203,8 +183,10 @@ Users enter these in Claude.ai under **Settings → Integrations → Snowflake**
 For each new user that needs access:
 
 - [ ] Grant the MCP role to the user: `GRANT ROLE <role_name> TO USER <username>;`
-- [ ] Set default role: `ALTER USER <username> SET DEFAULT_ROLE = '<role_name>';`
-- [ ] Add delegated authorization: `ALTER USER <username> ADD DELEGATED AUTHORIZATION OF ROLE <role_name> TO SECURITY INTEGRATION <integration_name>;`
+- [ ] Set default role: `ALTER USER <username> SET DEFAULT_ROLE = '<role_name>';` (Not compulsory)
+- [ ] Grant user default role usage on MCP Server. `GRANT USAGE ON MCP SERVER ANALYTICS.REPORTING.SNOWFLAKE_AGENT_MCP_SERVER
+   TO ROLE CORTEX_AGENT_USER_ROLE;`
+
 - [ ] Share server URL, client ID, and client secret with the user
 
 ---
@@ -246,3 +228,6 @@ SHOW GRANTS TO USER <username>;
 ```sql
 SHOW MCP SERVERS IN SCHEMA <database>.<schema>;
 ```
+
+DESCRIBE SECURITY INTEGRATION CLAUDE_MCP_OAUTH;
+SHOW DELEGATED AUTHORIZATIONS TO SECURITY INTEGRATION CLAUDE_MCP_OAUTH;
