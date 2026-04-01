@@ -23,6 +23,8 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
+import yaml
+
 import requests
 import pandas as pd
 import snowflake.connector
@@ -44,6 +46,18 @@ from results import check_duplicate_name, save_results, save_manifest
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def load_eval_rules(rules_file: str) -> dict:
+    """
+    Load client-specific evaluation rules from a YAML file.
+    """
+    with open(rules_file, "r") as fh:
+        rules = yaml.safe_load(fh)
+    client = rules.get("client", "unknown")
+    domain = rules.get("domain", "")
+    logger.info(f"Loaded evaluation rules  client='{client}'  domain='{domain}'")
+    return rules
 
 
 # =============================================================================
@@ -549,118 +563,138 @@ def score_sql_parameters(expected_sql: str, generated_sql: Optional[str]) -> dic
     return result
 
 
-def score_instruction_compliance(generated_sql: Optional[str], question: str) -> dict:
+def score_instruction_compliance(generated_sql: Optional[str], question: str, rules: dict) -> dict:
     """
-    Check whether generated SQL follows the VBB instruction rules.
+    Check whether generated SQL follows the instruction rules defined in
+    evaluation_rules.yaml.
 
-    Rules checked:
-      1. Timezone conversion — dates must use CONVERT_TIMEZONE('UTC','America/New_York',…)
-      2. JOIN type — should use LEFT JOIN, not LEFT OUTER JOIN
-      3. ROAS column — ROAS calculations must use gross_less_discount_no_vat_normalized
-      4. Revenue column — default revenue should be net_revenue_no_vat_normalized
-      5. Google filter — Google platform filters should use LOWER(platform…) = 'google'
+    Returns:
+        {
+          "rule_results": {rule_name: bool, ...},
+          "score":        float,
+          "details":      str,                      
+        }
+    Rules that do not apply to a given query default to True (N/A = passed).
     """
-    result = {
-        "timezone": False,
-        "join_type": True,  # innocent until proven guilty
-        "roas_column": True,  # True = N/A or correct
-        "revenue_column": True,
-        "google_filter": True,
-        "score": 0.0,
-        "details": "",
-    }
+    compliance_cfg = rules.get("compliance_rules", {})
+    rule_results: dict[str, bool] = {}
+    details: list[str] = []
 
     if not generated_sql:
-        result["details"] = "No SQL generated"
-        result["score"] = 0.0
-        return result
+        # Populate all configured rule names as False when no SQL was generated
+        if compliance_cfg.get("timezone", {}).get("enabled"):
+            rule_results["timezone"] = False
+        if compliance_cfg.get("join_preference", {}).get("enabled"):
+            rule_results["join_type"] = False
+        for rd in compliance_cfg.get("metric_columns", []):
+            rule_results[rd["rule"]] = False
+        for rd in compliance_cfg.get("filter_patterns", []):
+            rule_results[rd["rule"]] = False
+        return {"rule_results": rule_results, "score": 0.0, "details": "No SQL generated"}
 
     sql_upper = generated_sql.upper()
-    details = []
-
-    # ── 1. Timezone conversion ──────────────────────────────────────────
-    # If the query references conversion_date it must wrap it with CONVERT_TIMEZONE
-    references_date = "CONVERSION_DATE" in sql_upper
-    has_tz_convert = "CONVERT_TIMEZONE" in sql_upper
-    if references_date:
-        result["timezone"] = has_tz_convert
-        if not has_tz_convert:
-            details.append("Missing CONVERT_TIMEZONE on date field")
-    else:
-        result["timezone"] = True  # N/A — no date field
-
-    # ── 2. JOIN type ────────────────────────────────────────────────────
-    if "LEFT OUTER JOIN" in sql_upper:
-        result["join_type"] = False
-        details.append("Uses LEFT OUTER JOIN instead of LEFT JOIN")
-
-    # ── 3. ROAS column ─────────────────────────────────────────────────
-    # If the query or question involves ROAS, the revenue side must use
-    # gross_less_discount_no_vat_normalized (not gross_revenue_no_vat_normalized)
     question_lower = question.lower()
-    is_roas_query = any(kw in question_lower for kw in ["roas", "return on ad spend"])
-    is_roas_sql = "ROAS" in sql_upper or (
-        "GROSS" in sql_upper and "WEIGHTED_SPEND" in sql_upper and "/" in sql_upper
-    )
 
-    if is_roas_query or is_roas_sql:
-        uses_correct = "GROSS_LESS_DISCOUNT_NO_VAT_NORMALIZED" in sql_upper
-        uses_wrong = (
-            "GROSS_REVENUE_NO_VAT_NORMALIZED" in sql_upper
-            and "GROSS_LESS_DISCOUNT" not in sql_upper
+    # ── Timezone rule ─────────────────────────────────────────────────────────
+    tz_cfg = compliance_cfg.get("timezone", {})
+    if tz_cfg.get("enabled", False):
+        date_cols = [c.upper() for c in tz_cfg.get("date_columns", [])]
+        required_fn = tz_cfg.get("required_function", "CONVERT_TIMEZONE").upper()
+        references_date = any(col in sql_upper for col in date_cols)
+        if references_date:
+            passed = required_fn in sql_upper
+            if not passed:
+                details.append(tz_cfg.get("error_message", "Missing timezone conversion on date field"))
+        else:
+            passed = True  # N/A — no date field
+        rule_results["timezone"] = passed
+
+    # ── Join preference rule ──────────────────────────────────────────────────
+    join_cfg = compliance_cfg.get("join_preference", {})
+    if join_cfg.get("enabled", False):
+        disallowed = join_cfg.get("disallowed", "").upper()
+        if disallowed and disallowed in sql_upper:
+            rule_results["join_type"] = False
+            details.append(join_cfg.get("error_message", f"Uses disallowed join: {disallowed}"))
+        else:
+            rule_results["join_type"] = True
+
+    # ── Metric column rules ───────────────────────────────────────────────────
+    for rd in compliance_cfg.get("metric_columns", []):
+        rule_name   = rd["rule"]
+        trigger_kws = [kw.lower() for kw in rd.get("trigger_keywords", [])]
+        correct_col = rd.get("correct_column", "").upper()
+        incorrect_col = rd.get("incorrect_column", "").upper()
+        exclude_kws = [kw.lower() for kw in rd.get("exclude_when_keywords", [])]
+
+        # Skip entirely when question matches exclusion keywords
+        if exclude_kws and any(kw in question_lower for kw in exclude_kws):
+            rule_results[rule_name] = True  # N/A
+            continue
+
+        # Determine whether this rule is triggered
+        triggered_by_q = any(kw in question_lower for kw in trigger_kws)
+
+        # SQL-level trigger: explicit keywords (e.g. "ROAS" in SQL)
+        triggered_by_sql = any(
+            kw.upper() in sql_upper
+            for kw in rd.get("sql_trigger_keywords", [])
         )
-        if uses_wrong:
-            result["roas_column"] = False
-            details.append("ROAS uses gross_revenue instead of gross_less_discount")
-        elif uses_correct:
-            result["roas_column"] = True
-        # else: can't determine, default True (benefit of doubt)
 
-    # ── 4. Revenue column ──────────────────────────────────────────────
-    # Default revenue = net_revenue_no_vat_normalized
-    # Only flag if it uses gross_revenue for plain "revenue" (not ROAS)
-    is_revenue_query = any(kw in question_lower for kw in [
-        "revenue", "total revenue", "attributed revenue",
-    ]) and not is_roas_query
-    if is_revenue_query:
-        uses_net = "NET_REVENUE_NO_VAT_NORMALIZED" in sql_upper
-        uses_gross_only = (
-            "GROSS_REVENUE_NO_VAT_NORMALIZED" in sql_upper
-            and "NET_REVENUE" not in sql_upper
-        )
-        if uses_gross_only:
-            result["revenue_column"] = False
-            details.append("Revenue uses gross_revenue instead of net_revenue")
-        elif uses_net:
-            result["revenue_column"] = True
+        # SQL-level trigger: column co-occurrence (e.g. GROSS + WEIGHTED_SPEND + "/")
+        if not triggered_by_sql:
+            detect_cols = [c.upper() for c in rd.get("sql_detection_columns", [])]
+            if detect_cols and all(c in sql_upper for c in detect_cols):
+                needs_div = rd.get("sql_detection_requires_divide", False)
+                if not needs_div or "/" in generated_sql:
+                    triggered_by_sql = True
 
-    # ── 5. Google filter ───────────────────────────────────────────────
-    is_google_query = "google" in question_lower
-    if is_google_query and "GOOGLE" in sql_upper:
-        # Check for LOWER() wrapping any platform-like column
-        has_lower_pattern = bool(
-            re.search(r"LOWER\s*\([^)]*PLATFORM[^)]*\)\s*=\s*'GOOGLE'", sql_upper)
-        )
-        # Also accept direct string comparison (case-insensitive search)
-        has_direct_pattern = bool(
-            re.search(r"PLATFORM\w*\s*=\s*'google'", generated_sql, re.IGNORECASE)
-        )
-        result["google_filter"] = has_lower_pattern or has_direct_pattern
-        if not result["google_filter"]:
-            details.append("Google filter missing LOWER() or direct comparison")
+        if triggered_by_q or triggered_by_sql:
+            uses_wrong = incorrect_col in sql_upper and correct_col not in sql_upper
+            if uses_wrong:
+                rule_results[rule_name] = False
+                details.append(rd.get("error_message", f"Wrong column for rule '{rule_name}'"))
+            else:
+                rule_results[rule_name] = True  # correct, or benefit of the doubt
+        else:
+            rule_results[rule_name] = True  # N/A — rule not triggered
 
-    # ── Overall score ──────────────────────────────────────────────────
-    checks = [
-        result["timezone"],
-        result["join_type"],
-        result["roas_column"],
-        result["revenue_column"],
-        result["google_filter"],
-    ]
-    result["score"] = round(sum(checks) / len(checks) * 100, 1)
-    result["details"] = " | ".join(details) if details else "All rules followed"
+    # ── Filter pattern rules ──────────────────────────────────────────────────
+    for rd in compliance_cfg.get("filter_patterns", []):
+        rule_name   = rd["rule"]
+        trigger_kws = [kw.lower() for kw in rd.get("trigger_keywords", [])]
+        sql_must    = rd.get("sql_must_contain", "").upper()
 
-    return result
+        triggered  = any(kw in question_lower for kw in trigger_kws)
+        sql_has_kw = not sql_must or sql_must in sql_upper
+
+        if triggered and sql_has_kw:
+            valid_pat    = rd.get("valid_pattern", "")
+            fallback_pat = rd.get("fallback_pattern", "")
+            fb_flags_str = rd.get("fallback_flags", "")
+
+            has_valid    = bool(re.search(valid_pat, sql_upper)) if valid_pat else False
+            has_fallback = False
+            if fallback_pat:
+                flags = re.IGNORECASE if "IGNORECASE" in fb_flags_str else 0
+                has_fallback = bool(re.search(fallback_pat, generated_sql, flags))
+
+            passed = has_valid or has_fallback
+            rule_results[rule_name] = passed
+            if not passed:
+                details.append(rd.get("error_message", f"Filter pattern check failed: {rule_name}"))
+        else:
+            rule_results[rule_name] = True  # N/A
+
+    # ── Overall score ─────────────────────────────────────────────────────────
+    all_checks = list(rule_results.values())
+    score = round(sum(all_checks) / len(all_checks) * 100, 1) if all_checks else 100.0
+
+    return {
+        "rule_results": rule_results,
+        "score": score,
+        "details": " | ".join(details) if details else "All rules followed",
+    }
 
 
 def detect_hallucinations(conn, generated_sql: Optional[str]) -> dict:
@@ -689,15 +723,12 @@ def detect_hallucinations(conn, generated_sql: Optional[str]) -> dict:
         return result
 
 
-def score_nl_quality(question: str, nl_response: Optional[str], generated_sql: Optional[str]) -> dict:
+def score_nl_quality(question: str, nl_response: Optional[str], generated_sql: Optional[str], nl_config: dict) -> dict:
     """
     Score natural language response quality on a 0-5 scale.
-    Aligned with VBB response instructions:
-      - Provide data-driven answers with relevant metrics
-      - Include specific numbers and percentages
-      - Specify time period for any metrics
-      - Suggest actionable recommendations when relevant
-      - Format with clear structure: key metrics first, then details, then insights
+
+    Bonus-point checks are controlled by nl_config (the nl_quality section of
+    evaluation_rules.yaml).
 
     0: No response or complete failure
     1: Response exists but is irrelevant
@@ -723,9 +754,11 @@ def score_nl_quality(question: str, nl_response: Optional[str], generated_sql: O
     score = 3  # baseline
     notes = []
 
-    # ── Appropriate refusal ─────────────────────────────────────────────
-    cant_answer_phrases = ["cannot", "can't", "unable to", "don't have", "not able",
-                           "i need more information", "more context"]
+    # ── Appropriate refusal ───────────────────────────────────────────────────
+    cant_answer_phrases = [
+        "cannot", "can't", "unable to", "don't have", "not able",
+        "i need more information", "more context",
+    ]
     if any(phrase in nl_lower for phrase in cant_answer_phrases):
         if not generated_sql:
             score = 4  # appropriate refusal
@@ -734,18 +767,17 @@ def score_nl_quality(question: str, nl_response: Optional[str], generated_sql: O
             score = 2  # contradictory
             notes.append("Contradictory: claims inability but generated SQL")
 
-    # ── Response length ─────────────────────────────────────────────────
+    # ── Response length ───────────────────────────────────────────────────────
     if len(nl_response) < 20:
         score = min(score, 2)
         notes.append("Response too brief")
 
-    # ── SQL generated alongside NL ─────────────────────────────────────
+    # ── SQL generated alongside NL ────────────────────────────────────────────
     if generated_sql and not notes:
         score = 4
         notes.append("SQL generated with explanation")
 
-    # ── Enhanced checks (aligned to VBB response instructions) ─────────
-
+    # ── Enhanced checks
     # 1. Time period mentioned?
     time_keywords = [
         "month", "quarter", "week", "year", "day", "period",
@@ -769,19 +801,20 @@ def score_nl_quality(question: str, nl_response: Optional[str], generated_sql: O
     result["has_recommendations"] = any(ph in nl_lower for ph in recommendation_phrases)
 
     # 4. Specific numbers / percentages?
-    has_numbers = bool(re.search(r'\$[\d,]+\.?\d*|\d+\.?\d*%|\d{1,3}(,\d{3})+', nl_response))
-    result["has_specific_numbers"] = has_numbers
+    result["has_specific_numbers"] = bool(
+        re.search(r'\$[\d,]+\.?\d*|\d+\.?\d*%|\d{1,3}(,\d{3})+', nl_response)
+    )
 
-    # ── Bonus points for instruction compliance ────────────────────────
+    # ── Bonus points───────────────────
     if generated_sql:
-        bonus = 0
-        if result["mentions_time_period"]:
+        bonus = 0.0
+        if nl_config.get("check_time_period", True) and result["mentions_time_period"]:
             bonus += 0.25
-        if result["is_structured"]:
+        if nl_config.get("check_structured_format", True) and result["is_structured"]:
             bonus += 0.25
-        if result["has_specific_numbers"]:
+        if nl_config.get("check_specific_numbers", True) and result["has_specific_numbers"]:
             bonus += 0.25
-        if result["has_recommendations"]:
+        if nl_config.get("check_recommendations", True) and result["has_recommendations"]:
             bonus += 0.25
         score = min(5, score + bonus)
 
@@ -793,9 +826,10 @@ def score_nl_quality(question: str, nl_response: Optional[str], generated_sql: O
 # =============================================================================
 # Main eval pipeline
 # =============================================================================
-def run_eval(questions: list[GoldenQuestion]) -> list[EvalResult]:
-    """Run the full evaluation pipeline."""
+def run_eval(questions: list[GoldenQuestion], rules: dict) -> list[EvalResult]:
+    """Run the full evaluation pipeline using the supplied evaluation rules."""
 
+    nl_config = rules.get("nl_quality", {})
     conn = get_snowflake_connection()
     token = get_session_token(conn)
     results = []
@@ -865,14 +899,16 @@ def run_eval(questions: list[GoldenQuestion]) -> list[EvalResult]:
 
         # 4. Score instruction compliance
         if eval_result.generated_sql:
-            compliance = score_instruction_compliance(eval_result.generated_sql, q.question)
+            compliance = score_instruction_compliance(eval_result.generated_sql, q.question, rules)
             eval_result.compliance_score = compliance["score"]
-            eval_result.compliance_timezone = compliance["timezone"]
-            eval_result.compliance_join_type = compliance["join_type"]
-            eval_result.compliance_roas_column = compliance["roas_column"]
-            eval_result.compliance_revenue_column = compliance["revenue_column"]
-            eval_result.compliance_google_filter = compliance["google_filter"]
             eval_result.compliance_details = compliance["details"]
+            rule_res = compliance["rule_results"]
+            # Map dynamic rule results to EvalResult fields (default True = N/A / not configured)
+            eval_result.compliance_timezone       = rule_res.get("timezone",       True)
+            eval_result.compliance_join_type      = rule_res.get("join_type",      True)
+            eval_result.compliance_roas_column    = rule_res.get("roas_column",    True)
+            eval_result.compliance_revenue_column = rule_res.get("revenue_column", True)
+            eval_result.compliance_google_filter  = rule_res.get("google_filter",  True)
 
         # 5. Detect hallucinations
         if eval_result.generated_sql:
@@ -880,8 +916,8 @@ def run_eval(questions: list[GoldenQuestion]) -> list[EvalResult]:
             eval_result.is_hallucination = hallucination["is_hallucination"]
             eval_result.hallucination_details = hallucination["details"]
 
-        # 6. Score NL quality (enhanced with instruction alignment)
-        nl_scores = score_nl_quality(q.question, eval_result.nl_response, eval_result.generated_sql)
+        # 6. Score NL quality
+        nl_scores = score_nl_quality(q.question, eval_result.nl_response, eval_result.generated_sql, nl_config)
         eval_result.nl_quality_score = nl_scores["score"]
         eval_result.nl_quality_notes = nl_scores["notes"]
         eval_result.nl_mentions_time_period = nl_scores["mentions_time_period"]
@@ -901,7 +937,29 @@ def run_eval(questions: list[GoldenQuestion]) -> list[EvalResult]:
 # =============================================================================
 # Reporting
 # =============================================================================
-def generate_report(results: list[EvalResult]) -> pd.DataFrame:
+def _build_compliance_display(rules: dict) -> dict:
+    """
+    Build an ordered {display_label: EvalResult_field_name} mapping from the
+    compliance_rules section of evaluation_rules.yaml, so the report section
+    is always in sync with the configured rules.
+    """
+    display: dict[str, str] = {}
+    cr = rules.get("compliance_rules", {})
+
+    if cr.get("timezone", {}).get("enabled"):
+        display["Timezone Conv."] = "compliance_timezone"
+    if cr.get("join_preference", {}).get("enabled"):
+        display["JOIN Type"] = "compliance_join_type"
+    for rd in cr.get("metric_columns", []):
+        label = rd["rule"].replace("_column", "").replace("_", " ").title() + " Col."
+        display[label] = f"compliance_{rd['rule']}"
+    for rd in cr.get("filter_patterns", []):
+        label = rd["rule"].replace("_filter", "").replace("_", " ").title() + " Filter"
+        display[label] = f"compliance_{rd['rule']}"
+    return display
+
+
+def generate_report(results: list[EvalResult], rules: dict) -> pd.DataFrame:
     """Generate a summary report from eval results."""
 
     df = pd.DataFrame([asdict(r) for r in results])
@@ -1011,15 +1069,9 @@ def generate_report(results: list[EvalResult]) -> pd.DataFrame:
     if has_sql.any():
         print(f"\n📋 INSTRUCTION COMPLIANCE")
         print(f"  Overall Compliance Score:      {avg_compliance:.1f}%")
-        compliance_rules = {
-            "Timezone Conv.":  "compliance_timezone",
-            "JOIN Type":       "compliance_join_type",
-            "ROAS Column":     "compliance_roas_column",
-            "Revenue Column":  "compliance_revenue_column",
-            "Google Filter":   "compliance_google_filter",
-        }
-        for label, col in compliance_rules.items():
-            pct = df.loc[has_sql, col].mean() * 100
+        compliance_display = _build_compliance_display(rules)
+        for label, col in compliance_display.items():
+            pct = df.loc[has_sql, col].mean() * 100 if col in df.columns else 0.0
             print(f"    {label:18s} {pct:.0f}%")
 
         # Show non-compliant questions
@@ -1070,6 +1122,15 @@ def main():
         required=True,
         help="Short name for this eval run, e.g. 'baseline' or 'updated_roas_docs'",
     )
+    parser.add_argument(
+        "--rules",
+        default="evaluation_rules.yaml",
+        help=(
+            "Path to the evaluation rules YAML file "
+            "(default: evaluation_rules.yaml). "
+            "Create a separate file per client/domain — no code changes needed."
+        ),
+    )
     args = parser.parse_args()
 
     name = args.name.strip().replace(" ", "_")
@@ -1082,6 +1143,9 @@ def main():
         )
         return
 
+    # Load evaluation rules
+    rules = load_eval_rules(args.rules)
+
     logger.info(f"Starting Cortex Analyst evaluation — run: '{name}'")
 
     # Load golden questions
@@ -1092,14 +1156,14 @@ def main():
         return
 
     # Run evaluation
-    results = run_eval(questions)
+    results = run_eval(questions, rules)
 
     # Generate report
-    df = generate_report(results)
+    df = generate_report(results, rules)
 
     # Save detailed results + update manifest
     output_path = save_results(df, name)
-    save_manifest(df, name, output_path)
+    save_manifest(df, name, output_path, rules)
 
     logger.info(f"Evaluation complete. Results: {output_path}")
 

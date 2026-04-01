@@ -11,10 +11,10 @@ logger = logging.getLogger(__name__)
 
 MANIFEST_FILE = "manifest.csv"
 MANIFEST_COLUMNS = [
-    "name", "timestamp", "total_questions",
-    "sql_generation_rate", "sql_execution_rate", "exact_match",
+    "name", "timestamp", "client", "total_questions",
+    "sql_generation_rate", "sql_execution_rate", "table_accuracy", "exact_match",
     "param_accuracy", "compliance_score", "hallucination_rate", "nl_quality_score",
-    "output_file",
+    "avg_latency_seconds", "output_file",
 ]
 
 
@@ -45,7 +45,7 @@ def save_results(df: pd.DataFrame, name: str) -> Path:
     return output_path
 
 
-def save_manifest(df: pd.DataFrame, name: str, output_path: Path):
+def save_manifest(df: pd.DataFrame, name: str, output_path: Path, rules: dict):
     """Append a one-row summary of this run to manifest.csv."""
     manifest_path = _results_dir() / MANIFEST_FILE
     total = len(df)
@@ -57,14 +57,17 @@ def save_manifest(df: pd.DataFrame, name: str, output_path: Path):
     row = {
         "name": name,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "client": rules.get("client", "unknown"),
         "total_questions": total,
         "sql_generation_rate": round(has_sql.sum() / total * 100, 1) if total else 0,
         "sql_execution_rate": round(evaluated["sql_executed_successfully"].sum() / len(evaluated) * 100, 1) if len(evaluated) else 0,
+        "table_accuracy": round(df.loc[has_params, "param_tables_score"].mean() * 100, 1) if has_params.any() else 0,
         "exact_match": round(evaluated["results_match"].sum() / len(evaluated) * 100, 1) if len(evaluated) else 0,
         "param_accuracy": round(df.loc[has_params, "param_accuracy"].mean(), 1) if has_params.any() else 0,
         "compliance_score": round(df.loc[has_sql, "compliance_score"].mean(), 1) if has_sql.any() else 0,
         "hallucination_rate": round(df["is_hallucination"].sum() / total * 100, 1) if total else 0,
         "nl_quality_score": round(df["nl_quality_score"].mean(), 2),
+        "avg_latency_seconds": round(df["latency_seconds"].mean(), 2),
         "output_file": output_path.name,
     }
 
