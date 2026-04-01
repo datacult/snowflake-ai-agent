@@ -302,6 +302,154 @@ To stop the bot press `Ctrl + C` in the terminal.
 
 ---
 
+## Step 7 — CI/CD: Automated Deployment to EC2 (GitHub Actions)
+
+Every push to `main` automatically SSHs into your EC2 instance, pulls the latest code, reinstalls dependencies, and restarts the bot.
+
+### How It Works
+
+```
+Push to main branch
+       │
+       ▼
+GitHub Actions (ubuntu-latest runner)
+       │
+       ▼
+appleboy/ssh-action  ──► SSH into EC2 (using EC2_KEY secret)
+       │
+       ▼
+EC2: git pull origin main  ──► requires deploy key (EC2 → GitHub)
+       │
+       ▼
+EC2: pip install -r requirements.txt
+       │
+       ▼
+EC2: sudo systemctl restart slack-bot
+```
+
+---
+
+### Part A — GitHub Actions Secrets
+
+Go to your repo on GitHub → **Settings → Secrets and variables → Actions → New repository secret** and add all four:
+
+| Secret Name | Value |
+|---|---|
+| `EC2_HOST` | Your EC2 public IP or DNS (e.g. `54.123.45.67`) |
+| `EC2_USER` | The SSH username on your EC2 instance (e.g. `ubuntu`) |
+| `EC2_KEY` | The full contents of your `.pem` private key file |
+| `EC2_PATH` | The absolute path to the project on EC2 (e.g. `/home/ubuntu/slack-ai-bot`) |
+
+To get the contents of your `.pem` file:
+```bash
+cat ~/.ssh/your-key.pem
+```
+Copy everything including `-----BEGIN RSA PRIVATE KEY-----` and `-----END RSA PRIVATE KEY-----`.
+
+---
+
+### Part B — Deploy Key (EC2 → GitHub)
+
+The `EC2_KEY` secret above lets GitHub Actions SSH *into* EC2. But EC2 also needs to authenticate *with* GitHub to run `git pull` on a private repo. This requires a separate deploy key.
+
+**Step 1 — Generate a deploy key on EC2:**
+```bash
+ssh-keygen -t ed25519 -C "deploy-key" -f ~/.ssh/deploy_key -N ""
+cat ~/.ssh/deploy_key.pub
+```
+Copy the entire output (starts with `ssh-ed25519 ...`).
+
+**Step 2 — Add the public key to GitHub:**
+
+Go to your repo → **Settings → Deploy keys → Add deploy key**
+- **Title:** `EC2 Deploy Key`
+- **Key:** paste the output from `cat ~/.ssh/deploy_key.pub`
+- **Allow write access:** leave unchecked (read-only is sufficient for `git pull`)
+
+Click **Add key**. You can verify the fingerprint matches by running on EC2:
+```bash
+ssh-keygen -lf ~/.ssh/deploy_key.pub
+```
+
+**Step 3 — Configure SSH on EC2 to use the deploy key:**
+```bash
+echo -e "Host github.com\n  IdentityFile ~/.ssh/deploy_key\n  StrictHostKeyChecking no" >> ~/.ssh/config
+```
+
+**Step 4 — Switch the repo remote to SSH:**
+```bash
+cd ~/slack-ai-bot
+git remote set-url origin git@github.com:<your-org>/slack-ai-bot.git
+```
+
+**Step 5 — Test it:**
+```bash
+ssh -i ~/.ssh/deploy_key -T git@github.com
+# Expected: Hi <org>/slack-ai-bot! You've successfully authenticated...
+
+git pull origin main
+# Expected: Already up to date. (or a fast-forward if there are new commits)
+```
+
+---
+
+### Part C — systemd Service
+
+The pipeline restarts the bot using `sudo systemctl restart slack-bot`. This requires a systemd service named `slack-bot` to exist on EC2.
+
+If you haven't set it up yet, create the service file:
+
+```bash
+sudo nano /etc/systemd/system/slack-bot.service
+```
+
+Paste the following (adjust paths as needed):
+
+```ini
+[Unit]
+Description=Slack AI Bot
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/slack-ai-bot
+ExecStart=/home/ubuntu/slack-ai-bot/venv/bin/python app.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable slack-bot
+sudo systemctl start slack-bot
+```
+
+Allow the `ubuntu` user to restart the service without a password (required by the CI/CD script):
+```bash
+echo "ubuntu ALL=(ALL) NOPASSWD: /bin/systemctl restart slack-bot" | sudo tee /etc/sudoers.d/slack-bot
+```
+
+---
+
+### Verifying a Deployment
+
+After pushing to `main`, check the **Actions** tab on GitHub. In the **Deploy to EC2** step you should see:
+
+```
+Fast-forward
+ app.py | 2 +-
+ 1 file changed, ...
+Successfully executed commands to all host.
+```
+
+If `git pull` prints `fatal: could not read Username`, the deploy key is not set up correctly — revisit Part B above.
+
+---
+
 ## Using the Bot
 
 ### Mention the bot in any channel
