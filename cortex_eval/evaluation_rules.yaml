@@ -1,0 +1,77 @@
+client: VBB
+domain: Marketing Attribution
+
+compliance_rules:
+
+  timezone:
+    enabled: true
+    date_columns:
+      - conversion_date
+    required_function: CONVERT_TIMEZONE
+    error_message: "Missing CONVERT_TIMEZONE on date field"
+
+  join_preference:
+    enabled: true
+    required: "LEFT JOIN"
+    disallowed: "LEFT OUTER JOIN"
+    error_message: "Uses LEFT OUTER JOIN instead of LEFT JOIN"
+
+  # Rule 3+ — Metric column rules
+  # Each entry defines which column should be used for a specific metric.
+  # A rule is triggered when the question or the SQL matches the trigger
+  # criteria; the correct/incorrect columns are then checked.
+  metric_columns:
+
+    - rule: roas_column
+      # Question-level triggers
+      trigger_keywords:
+        - "roas"
+        - "return on ad spend"
+      # SQL-level triggers (any of these keywords found in the generated SQL)
+      sql_trigger_keywords:
+        - "ROAS"
+      # SQL structural detection: all listed columns + optional divide sign
+      sql_detection_columns:
+        - GROSS
+        - WEIGHTED_SPEND
+      sql_detection_requires_divide: true
+      # Column names (uppercase) used to verify correctness
+      correct_column: GROSS_LESS_DISCOUNT_NO_VAT_NORMALIZED
+      incorrect_column: GROSS_REVENUE_NO_VAT_NORMALIZED
+      error_message: "ROAS uses gross_revenue instead of gross_less_discount"
+
+    - rule: revenue_column
+      trigger_keywords:
+        - "revenue"
+        - "total revenue"
+        - "attributed revenue"
+      # Skip this rule entirely when the question is has these keywords
+      exclude_when_keywords:
+        - "roas"
+        - "return on ad spend"
+      correct_column: NET_REVENUE_NO_VAT_NORMALIZED
+      incorrect_column: GROSS_REVENUE_NO_VAT_NORMALIZED
+      error_message: "Revenue uses gross_revenue instead of net_revenue"
+
+  # Rule N — Filter pattern rules
+  # Checks that platform/channel filters are written in the expected form.
+  filter_patterns:
+
+    - rule: google_filter
+      trigger_keywords:
+        - "google"
+      sql_must_contain: "GOOGLE"
+      valid_pattern: "LOWER\\s*\\([^)]*PLATFORM[^)]*\\)\\s*=\\s*'GOOGLE'"
+      fallback_pattern: "PLATFORM\\w*\\s*=\\s*'google'"
+      fallback_flags: IGNORECASE
+      error_message: "Google filter missing LOWER() wrapping or direct string comparison"
+
+# ── NL quality checks ─────────────────────────────────────────────────────────
+# Controls which bonus-point checks are active in score_nl_quality().
+# Set a check to false to disable it for this client (score cap stays at 5,
+# but the maximum bonus is reduced proportionally).
+nl_quality:
+  check_time_period: true       # +0.25 if the response mentions a time period
+  check_structured_format: true # +0.25 if the response uses lists / headers
+  check_specific_numbers: true  # +0.25 if the response cites specific figures
+  check_recommendations: true   # +0.25 if the response suggests actions
